@@ -2,7 +2,81 @@
 // 目录从当前空间的工作目录往上找 .brain，找不到就用 ~/.brain。
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, panes, focused, readTextFile, writeTextFile, watchFolder, exec, hc, theme, home, openOverlay, nextCommand } from "herdr";
+import { spaces, panes, focused, readTextFile, writeTextFile, watchFolder, exec, hc, theme, home, run, appHome, openOverlay, nextCommand } from "herdr";
+
+// ── 会话（pi 历史）───────────────────────
+
+const LIMIT = 200;
+
+function norm(p) {
+  return String(p || "").replace(/\/+$/, "");
+}
+
+// 相对时间
+function ago(ms) {
+  const d = Date.now() - ms;
+  if (d < 60_000) return "刚刚";
+  if (d < 3_600_000) return `${Math.floor(d / 60_000)} 分钟前`;
+  if (d < 86_400_000) return `${Math.floor(d / 3_600_000)} 小时前`;
+  if (d < 7 * 86_400_000) return `${Math.floor(d / 86_400_000)} 天前`;
+  const t = new Date(ms);
+  return `${t.getMonth() + 1}月${t.getDate()}日`;
+}
+
+function sizeText(bytes) {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)}K`;
+  return `${(bytes / 1024 / 1024).toFixed(1)}M`;
+}
+
+// 卡片底色：要比面板底明显深一档，主题里的 ansi0 只深一点点，看不出来。
+function cardBg(t) {
+  const bg = String(t.background || "").toLowerCase();
+  const m = /^#([0-9a-f]{6})$/.exec(bg);
+  const dark = m
+    ? (parseInt(m[1].slice(0, 2), 16) * 0.299 + parseInt(m[1].slice(2, 4), 16) * 0.587 + parseInt(m[1].slice(4, 6), 16) * 0.114) < 128
+    : true;
+  return dark ? "#16171d" : "#ececf0";
+}
+
+// 自带 UTF-8 + base64：这套运行时没有 TextEncoder / btoa。
+function utf8Bytes(str) {
+  const out = [];
+  for (let i = 0; i < str.length; i++) {
+    let c = str.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff && i + 1 < str.length) {
+      const d = str.charCodeAt(i + 1);
+      if (d >= 0xdc00 && d <= 0xdfff) {
+        c = 0x10000 + ((c - 0xd800) << 10) + (d - 0xdc00);
+        i++;
+      }
+    }
+    if (c < 0x80) out.push(c);
+    else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63));
+    else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+    else out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+  }
+  return out;
+}
+
+function toBase64(str) {
+  const bytes = utf8Bytes(String(str));
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 3) {
+    const a = bytes[i], b = bytes[i + 1], c = bytes[i + 2];
+    out += chars[a >> 2];
+    out += chars[((a & 3) << 4) | ((b ?? 0) >> 4)];
+    out += b === undefined ? "=" : chars[((b & 15) << 2) | ((c ?? 0) >> 6)];
+    out += c === undefined ? "=" : chars[c & 63];
+  }
+  return out;
+}
+
+function remoteScanCommand(scriptText, limit) {
+  const b64 = toBase64(String(scriptText));
+  return `tmp=$(mktemp /tmp/scan-XXXXXX.js); printf %s '${b64}' | base64 -d > "$tmp" 2>/dev/null; node "$tmp" --limit ${limit}; rc=$?; rm -f "$tmp"; exit $rc`;
+}
 
 // ── 解析 ─────────────────────────────────
 
@@ -159,12 +233,21 @@ export default class AbsPanel extends View {
     this.todo = { doing: [], done: [] };
     this.index = { sections: [], rules: [] };
     this.log = [];
-    this.view = "board";
+    this.view = "sessions";
     this.loading = true;
+    // 会话页的状态
+    this.sessions = [];
+    this.machine = null;
+    this.confirmDelete = null;
+    this.scriptText = null;
+    this.loadingScript = false;
     this.note = null;
     this.watched = null;
     this.watchKey = null;
     this.refresh(cx);
+    // 会话页：读扫描脚本，读完自己会扫一次；另外每 10 秒扫一轮。
+    this.loadScript(cx);
+    cx.timer.every(10000, (cx) => this.sessRefresh(cx));
     // 快捷键 / 命令行能触发的命令：abs-panel.open-zed、abs-panel.open-code。
     cx.spawn(async (cx) => {
       for (;;) {
@@ -530,6 +613,153 @@ export default class AbsPanel extends View {
     }).catch(fail);
   }
 
+  // 会话扫描脚本的源码（远程要用）。readTextFile 在这套运行时里会挂住，所以用 cat。
+  loadScript(cx) {
+    if (this.loadingScript) return;
+    this.loadingScript = true;
+    const path = `${appHome()}/mods/abs-panel/scripts/scan.js`;
+    cx.spawn(async (cx) => {
+      try {
+        const r = await exec("cat", [path]);
+        if (r?.code === 0 && r.stdout) {
+          this.scriptText = r.stdout;
+          this.sessRefresh(cx);
+        }
+      } catch {
+        this.scriptText = null;
+      } finally {
+        this.loadingScript = false;
+        cx.notify();
+      }
+    });
+  }
+
+  // 会话页：整块就是一张卡片，里面是会话列表。
+  // 会话页：和别的页一样用 card()，样式统一。
+  sessCards() {
+    const t = theme();
+    const list = this.sessVisible();
+    const body = list.length
+      ? list.map((x) => this.sessRow(x))
+      : [div().px(6).py(8).text_size(11.5).text_color(t.dim).child("这个文件夹没有会话")];
+    return [this.card(this.machine ? `pi 会话 · ${this.machine}` : "pi 会话", list.length, body)];
+  }
+
+  sessTargets() {
+    const out = [{ on: this.sessOn() }];
+    const seen = new Set([this.sessOn() ?? "__local__"]);
+    for (const sp of spaces()) {
+      const key = sp.machine ?? "__local__";
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ on: sp.machine ?? null });
+    }
+    return out;
+  }
+
+  async sessScanOn(on) {
+    if (on) {
+      if (!this.scriptText) throw new Error("脚本还没读到");
+      const r = await exec("sh", ["-c", remoteScanCommand(this.scriptText, LIMIT)], { on });
+      if (r.code !== 0) throw new Error((r.stderr || r.stdout || "扫描失败").trim().slice(0, 160));
+      return JSON.parse((r.stdout || "").trim() || "{}").sessions ?? [];
+    }
+    // 本机没装 node 就跳过，不算错误。
+    const probe = await exec("sh", ["-c", "command -v node >/dev/null 2>&1 && echo ok || echo missing"]);
+    if ((probe.stdout || "").trim() !== "ok") return [];
+    const r = await exec("node", [`${appHome()}/mods/abs-panel/scripts/scan.js`, "--limit", String(LIMIT)]);
+    if (r.code !== 0) throw new Error((r.stderr || r.stdout || "扫描失败").trim().slice(0, 160));
+    return JSON.parse((r.stdout || "").trim() || "{}").sessions ?? [];
+  }
+
+  sessRefresh(cx) {
+    cx.spawn(async (cx) => {
+      const errors = [];
+      let got = null;
+      for (const t of this.sessTargets()) {
+        try {
+          const list = await this.sessScanOn(t.on);
+          if (list.length) {
+            got = { on: t.on, list };
+            break;
+          }
+        } catch (e) {
+          errors.push(String(e?.message || e).slice(0, 80));
+        }
+      }
+      this.sessions = got?.list ?? [];
+      this.machine = got?.on ?? null;
+      this.error = got ? null : errors.join("；") || null;
+      this.loading = false;
+      cx.notify();
+    });
+  }
+
+  sessOn() {
+    const space = spaces().find((s) => s.active);
+    return space?.machine ?? null;
+  }
+
+  sessCwd() {
+    const space = spaces().find((s) => s.active);
+    const f = focused();
+    const pane = f?.pane ? panes().find((p) => p.pane === f.pane) : null;
+    return norm(pane?.cwd || f?.cwd || space?.folder || home());
+  }
+
+  sessResume(s, cx) {
+    this.error = null;
+    run("pane.split", { direction: "right", argv: ["pi", "--session", s.file || s.id] });
+    cx.notify();
+  }
+
+  sessRemove(s, cx) {
+    if (this.confirmDelete !== s.id) {
+      this.confirmDelete = s.id;
+      cx.notify();
+      return;
+    }
+    this.confirmDelete = null;
+    cx.notify();
+    const on = this.machine;
+    const safe = String(s.file).replace(/'/g, "'\\''");
+    exec("sh", ["-c", `rm -f -- '${safe}'`], on ? { on } : undefined)
+      .then(() => this.sessRefresh(cx))
+      .catch((e) => {
+        this.error = `删除失败：${String(e?.message || e).slice(0, 100)}`;
+        this.sessRefresh(cx);
+      });
+  }
+
+  sessVisible() {
+    const here = this.sessCwd();
+    return this.sessions.filter((s) => norm(s.cwd) === here);
+  }
+
+  sessRow(s) {
+    const t = theme();
+    const arming = this.confirmDelete === s.id;
+    // 标题用会话开头那句，比「当前文件夹」有用。
+    const title = s.preview || s.id;
+    return v_flex().id(`sess-${s.id}`).w_full().flex_none().gap(3).px(7).py(6).rounded(8)
+      .bg(cardBg(t)).border_1().border_color(arming ? t.ansi1 : t.border).cursor_pointer()
+      .hover((el) => el.bg(t.selection))
+      .on_click((_e, cx) => this.sessResume(s, cx))
+      .child(h_flex().gap(6).items_center()
+        .child(div().flex_1().min_w(0).truncate().text_size(12).font_semibold().text_color(t.foreground).child(title))
+        .child(div().text_size(10).flex_none().text_color(t.dim).child(ago(s.mtime)))
+        // 删除按钮：点自己不冒泡到整行的「恢复」
+        .child(h_flex().id(`del-${s.id}`).h(16).px(4).flex_none().items_center().rounded(4)
+          .bg(arming ? t.ansi1 : t.chrome).cursor_pointer()
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+          .on_click((_e, cx) => { cx.stop_propagation(); this.sessRemove(s, cx); })
+          .child(div().text_size(9.5).text_color(arming ? t.background : t.dim).child(arming ? "删?" : "×"))))
+      .child(h_flex().gap(6).items_center()
+        .child(div().flex_1().min_w(0).truncate().text_size(9.5).text_color(t.dim).child(s.id))
+        .child(div().text_size(9.5).flex_none().text_color(t.dim).child(sizeText(s.size))));
+  }
+
+
   render(cx) {
     // 空间/pane 一换，spaces() 和 focused() 变了就会重渲染；这里立刻跟上，不等定时器。
     this.check(this.where(), cx);
@@ -540,12 +770,13 @@ export default class AbsPanel extends View {
       .bg(this.view === id ? t.selected : t.chrome).text_color(this.view === id ? t.foreground : t.muted)
       .hover((s) => s.bg(t.hover)).on_click((_e, cx) => { this.view = id; cx.notify(); }).child(label);
     // 图谱页把铁律放最上面，下面才是分类索引。
-    const body = this.view === "board" ? [this.boardCard(), this.logCard()]
+    const body = this.view === "sessions" ? this.sessCards()
+      : this.view === "board" ? [this.boardCard(), this.logCard()]
       : this.view === "index" ? [this.rulesCard(), this.indexCard()]
       : [this.logCard(), this.boardCard()];
     return v_flex().id("abs-panel").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground)
       .child(h_flex().h(38).flex_none().px(12).gap(6).items_center().bg(t.chrome).border_b(1).border_color(t.border)
-        .child(tab("board", "看板")).child(tab("index", "图谱")).child(tab("log", "日志"))
+        .child(tab("sessions", "会话")).child(tab("board", "看板")).child(tab("index", "图谱")).child(tab("log", "日志"))
         .child(div().flex_1())
         .child(div().id("abs-refresh").size(22).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim)
           .hover((s) => s.bg(t.hover).text_color(t.foreground))
