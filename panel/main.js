@@ -162,25 +162,36 @@ function parseIndex(text) {
   for (const raw of text.split("\n")) {
     const line = raw.replace(/\s+$/, "");
     if (line.startsWith("## ")) {
+      // 除了铁律段（单独收成清单），其他 ## 标题一律当分类。
+      // 不管叫什么名字、有没有带「（N 页）」计数，都不写死。
       const head = line.slice(3).trim();
-      const count = /（\s*(\d+)\s*(?:页|条)?\s*）/.exec(head);
-      // Rules 不是图谱页，单独收成铁律清单，不参与「页数」统计。
       inRules = isRulesHeading(head);
-      current = inRules ? null : { name: count ? head.slice(0, head.indexOf("（")).trim() : head, items: [], stated: count ? Number(count[1]) : null };
-      if (current) sections.push(current);
+      if (inRules) {
+        current = null;
+        continue;
+      }
+      const count = /（\s*(\d+)\s*(?:页|条)?\s*）/.exec(head);
+      current = {
+        name: count ? head.slice(0, count.index).trim() : head,
+        title: head,
+        items: [],
+        stated: count ? Number(count[1]) : null,
+      };
+      sections.push(current);
       continue;
     }
     if (!line.startsWith("- ")) continue;
     if (inRules) {
-      const text = line.slice(2).trim();
-      if (text) rules.push(text);
+      const t = line.slice(2).trim();
+      if (t) rules.push(t);
     } else if (current) {
       const link = /\[\[([^\]]+)\]\]/.exec(line)?.[1];
       const about = line.includes(" — ") ? line.slice(line.indexOf(" — ") + 3).trim() : "";
       current.items.push({ name: link ?? line.slice(2).trim(), about });
     }
   }
-  return { sections: sections.filter((s) => s.items.length || s.stated), rules, ruleCount: rules.length };
+  // 空分类也列出来：标题既然写在 index.md 里，就该显示，不能默默吞掉。
+  return { sections, rules, ruleCount: rules.length };
 }
 
 // 把 index.md 的铁律段换成给定的条目，其余部分原样不动。
@@ -444,7 +455,13 @@ export default class AbsPanel extends View {
     if (kind === "section") {
       openOverlay({
         mod: "abs-detail", kind: "dialog", width: 640, height: 520,
-        props: { title: item.name, meta: [`${item.items.length} 条`], body: item.items.map((x) => `· ${x.name}${x.about ? " — " + x.about : ""}`) },
+        props: {
+          title: item.title || item.name,
+          meta: [`${item.items.length} 条`],
+          body: item.items.length
+            ? item.items.map((x) => `· ${x.name}${x.about ? " — " + x.about : ""}`)
+            : ["这个分类下还没有条目。"],
+        },
       });
       return;
     }
@@ -499,8 +516,9 @@ export default class AbsPanel extends View {
 
   indexCard() {
     const t = theme();
-    // 只隐藏空分类，不按名字排除：Sessions 常有十几条，以前被无條件过滤掉了。
-    const sections = (this.index.sections ?? []).filter((s) => s.items.length || s.stated);
+    // index.md 里出现的每个 ## 分类都列出来，空的也列（显示 0 页），
+    // 不按名字排除、也不因没条目就吞掉。
+    const sections = this.index.sections ?? [];
     return this.card(
       "图谱索引",
       `${(this.index.sections ?? []).reduce((n, s) => n + (s.items.length || s.stated || 0), 0)} 页`,
@@ -510,7 +528,7 @@ export default class AbsPanel extends View {
           .on_click(() => this.openDetail("section", s))
           .child(div().size(7).flex_none().rounded(4).bg(t.ansi6))
           .child(div().flex_1().min_w(0).truncate().text_size(12).font_semibold().text_color(t.foreground).child(s.name))
-          .child(div().text_size(10.5).text_color(t.muted).child(`${s.items.length || s.stated} 页`))) : [div().px(6).text_size(11.5).text_color(t.dim).child("索引为空")]),
+          .child(div().text_size(10.5).text_color(t.muted).child(`${s.items.length || s.stated || 0} 页`))) : [div().px(6).text_size(11.5).text_color(t.dim).child("索引为空")]),
       ],
     );
   }
