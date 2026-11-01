@@ -46,9 +46,10 @@ function parseTodo(text) {
 }
 
 function parseTask(line, group) {
-  let body = line.slice(2).trim(), state = "";
+  let body = line.slice(2).trim(), state = "", done = false;
   const box = /^\[([ x])\]\s+/.exec(body);
   if (box) {
+    done = box[1] === "x";
     body = body.slice(box[0].length);
     const st = /^\[([^\]]+)\]\s*/.exec(body);
     if (st) { state = st[1]; body = body.slice(st[0].length); }
@@ -66,7 +67,7 @@ function parseTask(line, group) {
     if (at >= 0) title = title.slice(0, at);
   }
   title = title.slice(title.indexOf(id) + id.length).trim();
-  return { group, state, id, who, date, title: title || id, note, verdict: /【([^】]+)】/.exec(note)?.[1] ?? "", kids: 0, children: [], line: line.trim() };
+  return { group, done, state, id, who, date, title: title || id, note, verdict: /【([^】]+)】/.exec(note)?.[1] ?? "", kids: 0, children: [], line: line.trim() };
 }
 
 // index.md 的分类计数，形如 `## Concepts` 后若干 `- [[页]] — 一句话`。
@@ -159,29 +160,32 @@ export default class AbsPanel extends View {
   }
 
   refresh(cx) {
-    this.note = null;
+    // 定时器、目录监听、切目录会同时叫；只留最新一轮，旧的结果丢掉。
+    const ticket = (this.refreshTicket ?? 0) + 1;
+    this.refreshTicket = ticket;
     const at = this.where();
-    // 记住这次是给哪个目录找的，读完前目录又变了就丢弃这轮结果。
     const context = `${at.on ?? ""}|${at.dir ?? ""}`;
+    // 提示只在「它属于这类消息」时清，不要抹掉 openIn 写的错误。
+    if (this.noteKind === "read") this.note = null;
     cx.spawn(async (cx) => {
       try {
         const dir = await this.findBrain(at);
-        if (context !== this.keyNow()) return;
+        if (ticket !== this.refreshTicket || context !== this.keyNow()) return;
         this.brainDir = dir;
         this.brainOn = dir ? at.on : null;
         if (dir !== this.watched) this.watched = null;
         this.watch(cx);
         const read = (name) => dir ? readTextFile(`${dir}/${name}`, { on: at.on }).catch(() => null) : Promise.resolve(null);
         const [todo, index, log] = await Promise.all([read("todo.md"), read("index.md"), read("log.md")]);
-        if (context !== this.keyNow()) return;
+        if (ticket !== this.refreshTicket || context !== this.keyNow()) return;
         this.todo = todo ? parseTodo(todo) : { doing: [], done: [] };
         this.index = index ? parseIndex(index) : { sections: [], rules: 0 };
         this.log = log ? parseLog(log) : [];
         // findBrain 自己写的原因（比如连不上机器）优先于「没找到」。
-        if (dir) this.note = null;
-        else if (this.note == null) this.note = "没找到 .brain 目录";
+        if (dir) { this.note = null; this.noteKind = null; }
+        else if (this.note == null) { this.note = "没找到 .brain 目录"; this.noteKind = "read"; }
       } catch (e) {
-        this.note = String(e);
+        if (ticket === this.refreshTicket) { this.note = String(e); this.noteKind = "open"; }
       } finally {
         this.loading = false;
         cx.notify();
@@ -228,16 +232,16 @@ export default class AbsPanel extends View {
     if (!dir || this.brainOn || this.watched === dir) return;
     this.watched = dir;
     cx.spawn(async (cx) => {
-      for (;;) {
-        try { await watchFolder(dir); } catch { this.watched = null; return; }
+      // 目录被删或改名时 watchFolder 会报错。等一会重试，不能就此停掉，
+      // 否则目录回来之后（或 brainDir 没变）就再也不监听了。
+      while (this.watched === dir) {
+        try { await watchFolder(dir); } catch { await new Promise((r) => setTimeout(r, 5000)); continue; }
         if (this.watched !== dir) return;
         this.refresh(cx);
         cx.notify();
       }
     });
   }
-
-  // ── 卡片 ───────────────────────────────
 
   // ── 卡片 ───────────────────────────────
 
@@ -253,9 +257,10 @@ export default class AbsPanel extends View {
   }
 
   // 三色：绿=进行中，红=暂停（滞留/搁置），橙=完成。
+  // 看 checkbox 本身而不是所在区：Done 区里也可能有没做完的 [ ] 行。
   stateColor(task) {
     const t = theme();
-    if (task.group === "done") return t.ansi3;
+    if (task.done) return t.ansi3;
     const paused = /滞留|搁置|讨论中/.test(task.state ?? "");
     return paused ? t.ansi1 : t.ansi2;
   }
@@ -358,14 +363,17 @@ export default class AbsPanel extends View {
     return this.card(
       "最近日志",
       `${this.log.length} 条`,
-      entries.length ? entries.map((e) => v_flex().w_full().flex_none().gap(2).px(6).py(5).rounded(7)
-        .bg(t.background).border_1().border_color(t.border).cursor_pointer().hover((el) => el.bg(t.hover))
-        .on_click(() => this.openDetail("entry", e))
-        .child(h_flex().gap(6).items_center()
-          .child(div().size(7).flex_none().rounded(4).bg(e.kind === "dev" ? t.ansi2 : t.ansi6))
-          .child(div().flex_1().min_w(0).truncate().text_size(12).font_semibold().text_color(t.foreground).child(e.text.split("\n")[0] || "(空)"))
-          .child(div().text_size(10).text_color(t.dim).child(e.when)))
-        .when(Boolean(e.kind), (el) => el.child(div().px(1).text_size(10).text_color(t.muted).child(e.kind)))) : [div().px(6).text_size(11.5).text_color(t.dim).child("还没有日志")],
+      entries.length ? entries.map((e) => {
+        const head = e.text.split("\n")[0] || "(空)";
+        return v_flex().w_full().flex_none().gap(2).px(6).py(5).rounded(7)
+          .bg(t.background).border_1().border_color(t.border).cursor_pointer().hover((el) => el.bg(t.hover))
+          .on_click(() => this.openDetail("entry", e))
+          .child(h_flex().gap(6).items_center()
+            .child(div().size(7).flex_none().rounded(4).bg(e.kind === "dev" ? t.ansi2 : t.ansi6))
+            .child(div().flex_1().min_w(0).truncate().text_size(12).font_semibold().text_color(t.foreground).child(head))
+            .child(div().text_size(10).text_color(t.dim).child(e.when)))
+          .when(Boolean(e.kind), (el) => el.child(div().px(1).text_size(10).text_color(t.muted).child(e.kind)));
+      }) : [div().px(6).text_size(11.5).text_color(t.dim).child("还没有日志")],
     );
   }
 
@@ -373,14 +381,16 @@ export default class AbsPanel extends View {
   openIn(editor) {
     const at = this.where();
     const dir = at.dir;
-    if (!dir) { this.note = "没有可打开的目录"; return; }
+    if (!dir) { this.note = "没有可打开的目录"; this.noteKind = "open"; return; }
     const bin = editor === "zed"
       ? "/Applications/Zed.app/Contents/MacOS/cli"
       : "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code";
     this.note = at.on ? `正在用 ${editor} 打开 ${at.on} 上的目录…` : null;
-    const finish = () => { this.note = null; };
+    this.noteKind = at.on ? "open" : null;
+    const finish = () => { if (this.noteKind === "open") { this.note = null; this.noteKind = null; } };
+    const fail = (e) => { this.note = `打开失败：${e}`; this.noteKind = "open"; };
     if (!at.on) {
-      exec(bin, [dir]).then(finish).catch((e) => { this.note = `打开失败：${e}`; });
+      exec(bin, [dir]).then(finish).catch(fail);
       return;
     }
     // 机器名（fnos）和 ssh 别名（FNOS）不一，先查 hc 拿 target。
@@ -394,7 +404,7 @@ export default class AbsPanel extends View {
       } catch { /* 查不到就用原名 */ }
       const args = editor === "zed" ? [`ssh://${host}${dir}`] : ["--remote", `ssh-remote+${host}`, dir];
       return exec(bin, args).then(finish);
-    }).catch((e) => { this.note = `打开失败：${e}`; });
+    }).catch(fail);
   }
 
   render(cx) {

@@ -46,9 +46,18 @@ src=$(find "$TMP" -maxdepth 1 -type d -name '*-*' | head -1)
 
 # ── 落盘 ─────────────────────────────────
 mkdir -p "$DEST"
-# 只换内容不换目录：正在跑的 mod 软链在这里，删目录会让它断掉。
-rm -rf "$DEST/panel" "$DEST/tabs-abs" "$DEST/detail" "$DEST/assets"
-cp -R "$src/panel" "$src/tabs-abs" "$src/detail" "$src/assets" "$DEST/"
+# 先拷到临时目录，成工了再换。直接删旧版再拷，拷到一半失败就什么都没有了。
+stage="$DEST/.staging"
+rm -rf "$stage"
+mkdir -p "$stage"
+cp -R "$src/panel" "$src/tabs-abs" "$src/detail" "$src/assets" "$stage/" || die "拷贝失败，旧版未动"
+[ -f "$stage/panel/main.js" ] || die "拷贝不完整，旧版未动"
+# 逐个换：只删一层内容不删目录，正在跑的 mod 软链指向这里。
+for item in panel tabs-abs detail assets; do
+  rm -rf "$DEST/$item"
+  mv "$stage/$item" "$DEST/$item" || die "替换 $item 失败"
+done
+rmdir "$stage" 2>/dev/null || true
 cp -f "$src/install.sh" "$DEST/install.sh"
 cp -f "$src/README.md" "$DEST/README.md" 2>/dev/null || true
 chmod +x "$DEST/install.sh"

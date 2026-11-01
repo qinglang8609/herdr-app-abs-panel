@@ -8,6 +8,9 @@ HOME_DIR="${HERDR_APP_HOME:-$HOME/.config/herdr-app}"
 MODS="$HOME_DIR/mods"
 
 [ -d "$HOME_DIR" ] || { echo "找不到 herdr-app 配置目录：$HOME_DIR" >&2; exit 1; }
+[ -f "$HOME_DIR/layouts/main.json" ] || { echo "缺 layouts/main.json，请先打开一次 herdr-app 让它生成出厂布局" >&2; exit 1; }
+
+mkdir -p "$MODS" "$HOME_DIR/layouts"
 
 # 面板与改过的标签栏都用软链接，改源码立刻生效，不往配置目录里复制代码。
 ln -sfn "$SRC/panel" "$MODS/abs-panel"
@@ -16,8 +19,8 @@ ln -sfn "$SRC/detail" "$MODS/abs-detail"
 
 # 图标按应用根目录解析（gpui-kit 的 image()/svg() 都这样），所以放在 app home 下，
 # 不能放在 mod 目录里。
+# 要复制而不是软链：image() 读不了软链接，会画成空方块。
 mkdir -p "$HOME_DIR/abs-icons"
-# 图标要复制而不是软链：image() 读不了软链接，会画成空方块。
 cp -f "$SRC/assets/zed.svg" "$HOME_DIR/abs-icons/zed.svg"
 cp -f "$SRC/assets/vscode.svg" "$HOME_DIR/abs-icons/vscode.svg"
 
