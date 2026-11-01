@@ -1,0 +1,6 @@
+# herdr-app 每台机器都有的类型文件，只给编辑器补全用，不进仓库
+gpui-kit.d.ts
+herdr.d.ts
+jsconfig.json
+
+.DS_Store
