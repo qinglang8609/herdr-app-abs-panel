@@ -268,10 +268,15 @@ export default class AbsPanel extends View {
     if (!dir || this.brainOn || this.watched === dir) return;
     this.watched = dir;
     cx.spawn(async (cx) => {
-      // 目录被删或改名时 watchFolder 会报错。等一会重试，不能就此停掉，
-      // 否则目录回来之后（或 brainDir 没变）就再也不监听了。
+      // 目录被删或改名时 watchFolder 会报错。不能就此停掉，要接着试。
+      // 这里不能用 setTimeout：herdr-app 没提供它，只能用 cx.timer。
       while (this.watched === dir) {
-        try { await watchFolder(dir); } catch { await new Promise((r) => setTimeout(r, 5000)); continue; }
+        try {
+          await watchFolder(dir);
+        } catch {
+          await new Promise((resolve) => cx.timer.after(5000, resolve));
+          continue;
+        }
         if (this.watched !== dir) return;
         this.refresh(cx);
         cx.notify();
