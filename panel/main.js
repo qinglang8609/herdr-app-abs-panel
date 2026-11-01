@@ -144,6 +144,15 @@ function parseTask(line, group) {
   return { group, done, state, id, who, date, title: title || id, note, verdict: /【([^】]+)】/.exec(note)?.[1] ?? "", kids: 0, children: [], line: line.trim() };
 }
 
+// 分区标题是不是「铁律区」。
+// 不写死 === "Rules"（2026-11-01 修）：图谱的分区标题可能带计数、emoji、或改成中文，
+//   `## Rules（17 条）` / `## ⚖️ Rules` / `## 铁律` 都该认出来。
+//   写死的后果：认不出 → 把铁律当普通页统计；rebuildRules 还会再插一个 `## Rules` 造成重复分区。
+function isRulesHeading(head) {
+  const s = String(head || "");
+  return /rules/i.test(s) || s.includes("铁律") || s.includes("硬规则");
+}
+
 // index.md 的分类计数，形如 `## Concepts` 后若干 `- [[页]] — 一句话`。
 function parseIndex(text) {
   const sections = [];
@@ -156,7 +165,7 @@ function parseIndex(text) {
       const head = line.slice(3).trim();
       const count = /（\s*(\d+)\s*(?:页|条)?\s*）/.exec(head);
       // Rules 不是图谱页，单独收成铁律清单，不参与「页数」统计。
-      inRules = head === "Rules";
+      inRules = isRulesHeading(head);
       current = inRules ? null : { name: count ? head.slice(0, head.indexOf("（")).trim() : head, items: [], stated: count ? Number(count[1]) : null };
       if (current) sections.push(current);
       continue;
@@ -174,11 +183,21 @@ function parseIndex(text) {
   return { sections: sections.filter((s) => s.items.length || s.stated), rules, ruleCount: rules.length };
 }
 
-// 把 index.md 的 ## Rules 段换成给定的条目，其余部分原样不动。
-// 文件里没有 ## Rules 就补一个（插在第一个二级标题前）。
+// 把 index.md 的铁律段换成给定的条目，其余部分原样不动。
+// 文件里没有铁律段就补一个（插在第一个二级标题前）。
+//
+// 不写死 `## Rules`（2026-11-01 修）：原实现用 `l.trim() === "## Rules"` 精确匹配，
+//   遇到 `## Rules（17 条）` 这类带计数的标题就认不出 → 走到「补一个」分支，
+//   于是文件里出现**两个铁律段**，写入的规则進不了原来那段，人看到的是「写了但没生效」。
+//   现在按标题内容识别（isRulesHeading），并保留原有标题文本不动。
 function rebuildRules(text, change) {
   const lines = text.split("\n");
-  let start = lines.findIndex((l) => l.trim() === "## Rules");
+  let start = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (!l.startsWith("## ")) continue;
+    if (isRulesHeading(l.slice(3).trim())) { start = i; break; }
+  }
   if (start < 0) {
     const at = lines.findIndex((l) => l.startsWith("## "));
     const insert = at < 0 ? lines.length : at;
