@@ -2,7 +2,7 @@
 // 目录从当前空间的工作目录往上找 .brain，找不到就用 ~/.brain。
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, panes, focused, readTextFile, watchFolder, exec, hc, theme, home, openOverlay, nextCommand } from "herdr";
+import { spaces, panes, focused, readTextFile, writeTextFile, watchFolder, exec, hc, theme, home, openOverlay, nextCommand } from "herdr";
 
 // ── 解析 ─────────────────────────────────
 
@@ -73,27 +73,62 @@ function parseTask(line, group) {
 // index.md 的分类计数，形如 `## Concepts` 后若干 `- [[页]] — 一句话`。
 function parseIndex(text) {
   const sections = [];
+  const rules = [];
   let current = null;
-  let rules = 0;
+  let inRules = false;
   for (const raw of text.split("\n")) {
     const line = raw.replace(/\s+$/, "");
     if (line.startsWith("## ")) {
       const head = line.slice(3).trim();
       const count = /（\s*(\d+)\s*(?:页|条)?\s*）/.exec(head);
-      if (head === "Rules") { current = null; continue; }
-      current = { name: count ? head.slice(0, head.indexOf("（")).trim() : head, items: [], stated: count ? Number(count[1]) : null };
-      sections.push(current);
+      // Rules 不是图谱页，单独收成铁律清单，不参与「页数」统计。
+      inRules = head === "Rules";
+      current = inRules ? null : { name: count ? head.slice(0, head.indexOf("（")).trim() : head, items: [], stated: count ? Number(count[1]) : null };
+      if (current) sections.push(current);
       continue;
     }
-    if (line.startsWith("- ") && current) {
+    if (!line.startsWith("- ")) continue;
+    if (inRules) {
+      const text = line.slice(2).trim();
+      if (text) rules.push(text);
+    } else if (current) {
       const link = /\[\[([^\]]+)\]\]/.exec(line)?.[1];
       const about = line.includes(" — ") ? line.slice(line.indexOf(" — ") + 3).trim() : "";
       current.items.push({ name: link ?? line.slice(2).trim(), about });
-    } else if (line.startsWith("- ") && !current) {
-      rules++;
     }
   }
-  return { sections: sections.filter((s) => s.items.length || s.stated), rules };
+  return { sections: sections.filter((s) => s.items.length || s.stated), rules, ruleCount: rules.length };
+}
+
+// 把 index.md 的 ## Rules 段换成给定的条目，其余部分原样不动。
+// 文件里没有 ## Rules 就补一个（插在第一个二级标题前）。
+function rebuildRules(text, change) {
+  const lines = text.split("\n");
+  let start = lines.findIndex((l) => l.trim() === "## Rules");
+  if (start < 0) {
+    const at = lines.findIndex((l) => l.startsWith("## "));
+    const insert = at < 0 ? lines.length : at;
+    lines.splice(insert, 0, "## Rules", "");
+    start = insert;
+  }
+  // 段尾：下一个二级标题之前，后面的空行归下一段
+  let end = start + 1;
+  while (end < lines.length && !lines[end].startsWith("## ")) end++;
+  let bodyEnd = end;
+  while (bodyEnd > start + 1 && lines[bodyEnd - 1].trim() === "") bodyEnd--;
+
+  const current = [];
+  for (const line of lines.slice(start + 1, bodyEnd)) {
+    const t = line.trim();
+    if (t.startsWith("- ")) {
+      const item = t.slice(2).trim();
+      if (item) current.push(item);
+    }
+  }
+  const next = change(current);
+  const body = next.length ? ["", ...next.map((r) => `- ${r}`)] : [];
+  lines.splice(start + 1, bodyEnd - start - 1, ...body);
+  return lines.join("\n");
 }
 
 // log.md 每条一行：## [YYYY-MM-DD HH:MM] [[作者]] kind | 正文
@@ -122,7 +157,7 @@ export default class AbsPanel extends View {
     this.brainDir = null;
     this.brainOn = null;
     this.todo = { doing: [], done: [] };
-    this.index = { sections: [], rules: 0 };
+    this.index = { sections: [], rules: [] };
     this.log = [];
     this.view = "board";
     this.loading = true;
@@ -136,6 +171,7 @@ export default class AbsPanel extends View {
         const cmd = await nextCommand();
         if (cmd === "open-zed") this.openIn("zed");
         else if (cmd === "open-code") this.openIn("code");
+        else if (cmd.startsWith("rule-add:")) this.addRuleText(cmd.slice("rule-add:".length));
         cx.notify();
       }
     });
@@ -179,7 +215,7 @@ export default class AbsPanel extends View {
         const [todo, index, log] = await Promise.all([read("todo.md"), read("index.md"), read("log.md")]);
         if (ticket !== this.refreshTicket || context !== this.keyNow()) return;
         this.todo = todo ? parseTodo(todo) : { doing: [], done: [] };
-        this.index = index ? parseIndex(index) : { sections: [], rules: 0 };
+        this.index = index ? parseIndex(index) : { sections: [], rules: [] };
         this.log = log ? parseLog(log) : [];
         // findBrain 自己写的原因（比如连不上机器）优先于「没找到」。
         if (dir) { this.note = null; this.noteKind = null; }
@@ -341,7 +377,8 @@ export default class AbsPanel extends View {
 
   indexCard() {
     const t = theme();
-    const sections = (this.index.sections ?? []).filter((s) => s.name !== "Sessions" && s.name !== "Sources").slice(0, 8);
+    // 只隐藏空分类，不按名字排除：Sessions 常有十几条，以前被无條件过滤掉了。
+    const sections = (this.index.sections ?? []).filter((s) => s.items.length || s.stated);
     return this.card(
       "图谱索引",
       `${(this.index.sections ?? []).reduce((n, s) => n + (s.items.length || s.stated || 0), 0)} 页`,
@@ -352,9 +389,90 @@ export default class AbsPanel extends View {
           .child(div().size(7).flex_none().rounded(4).bg(t.ansi6))
           .child(div().flex_1().min_w(0).truncate().text_size(12).font_semibold().text_color(t.foreground).child(s.name))
           .child(div().text_size(10.5).text_color(t.muted).child(`${s.items.length || s.stated} 页`))) : [div().px(6).text_size(11.5).text_color(t.dim).child("索引为空")]),
-        ...(this.index.rules > 0 ? [div().px(6).text_size(10.5).text_color(t.dim).child(`另有 ${this.index.rules} 条规则`)] : []),
       ],
     );
+  }
+
+  // 铁律卡：图谱顶上的独立一块，能直接改、能加。
+  rulesCard() {
+    const t = theme();
+    const rules = this.index.rules ?? [];
+    // writeTextFile 只能写本机，远程的 index.md 改不了。
+    const editable = !this.brainOn && Boolean(this.brainDir);
+    // 默认只摆前 3 条，多的收起来；点「全部」展开。删行按原编号，展开不展开都对。
+    const LIMIT = 3;
+    const expanded = this.rulesOpen === true;
+    const shown = expanded ? rules : rules.slice(0, LIMIT);
+    const hidden = rules.length - shown.length;
+    return this.card(
+      "铁律",
+      `${rules.length} 条`,
+      [
+        ...(shown.length ? shown.map((text, i) => h_flex().w_full().flex_none().gap(4).items_center().px(6).py(5).rounded(7)
+          .bg(t.background).border_1().border_color(t.border)
+          .child(div().text_size(10).flex_none().text_color(t.ansi3).child(`${i + 1}`))
+          .child(div().flex_1().min_w(0).text_size(11.5).text_color(t.foreground).child(text))
+          .when(editable, (e) => e.child(div().id(`abs-rule-del-${i}`).size(18).flex_none().flex().items_center().justify_center()
+            .rounded(5).text_size(11).text_color(t.dim).cursor_pointer()
+            .hover((s) => s.bg(t.hover).text_color(t.ansi1))
+            .on_click(() => this.removeRule(i)).child("×")))) : [div().px(6).text_size(11.5).text_color(t.dim).child("还没有铁律")]),
+        ...(hidden > 0 ? [h_flex().id("abs-rule-more").h(22).px(6).flex_none().items_center().text_size(10.5).text_color(t.dim)
+          .cursor_pointer().hover((s) => s.text_color(t.foreground))
+          .on_click((_e, cx) => { this.rulesOpen = true; cx.notify(); }).child(`还有 ${hidden} 条，展开`)] : []),
+        ...(expanded && rules.length > LIMIT ? [h_flex().id("abs-rule-less").h(22).px(6).flex_none().items_center().text_size(10.5).text_color(t.dim)
+          .cursor_pointer().hover((s) => s.text_color(t.foreground))
+          .on_click((_e, cx) => { this.rulesOpen = false; cx.notify(); }).child("收起")] : []),
+        editable
+          ? h_flex().id("abs-rule-add").mt(2).h(26).px(8).flex_none().items_center().justify_center().gap(5).rounded(7)
+            .bg(t.raised).border_1().border_color(t.border).text_size(11).text_color(t.muted).cursor_pointer()
+            .hover((s) => s.bg(t.hover).text_color(t.foreground))
+            .on_click(() => this.addRule()).child("+ 添加铁律")
+          : div().px(6).text_size(10.5).text_color(t.dim).child(this.brainOn ? `${this.brainOn} 上的文件改不了，只能看` : "没找到 index.md"),
+      ],
+    );
+  }
+
+  // 改 index.md 的 Rules 段：先整份读下来，换掉这一段，再整份写回。
+  async editRules(change) {
+    if (this.brainOn || !this.brainDir) return;
+    const path = `${this.brainDir}/index.md`;
+    try {
+      const text = await readTextFile(path);
+      if (text == null) { this.note = "读不到 index.md"; this.noteKind = "open"; return; }
+      const next = change(text);
+      if (next === text) return;
+      // expected 传原文：这期间文件被別处改了，写入会被拒绝，不会覆盖别人的改动。
+      await writeTextFile(path, next, text);
+      this.note = null;
+      this.noteKind = null;
+      this.refresh(this.lastCx);
+    } catch (e) {
+      this.note = `写 index.md 失败：${e}`;
+      this.noteKind = "open";
+    }
+  }
+
+  addRule() {
+    openOverlay({
+      mod: "abs-detail", kind: "dialog", width: 520, height: 240,
+      props: {
+        title: "添加铁律",
+        meta: ["写入 index.md 的 ## Rules"],
+        input: { placeholder: "一句话说清这条规矩" },
+        submitLabel: "添加",
+        submit: { name: "abs-panel.rule-add" },
+      },
+    });
+  }
+
+  removeRule(index) {
+    this.editRules((text) => rebuildRules(text, (cur) => cur.filter((_, i) => i !== index)));
+  }
+
+  addRuleText(rule) {
+    const line = String(rule ?? "").trim();
+    if (!line) return;
+    this.editRules((text) => rebuildRules(text, (cur) => (cur.includes(line) ? cur : [...cur, line])));
   }
 
   logCard() {
@@ -410,11 +528,16 @@ export default class AbsPanel extends View {
   render(cx) {
     // 空间/pane 一换，spaces() 和 focused() 变了就会重渲染；这里立刻跟上，不等定时器。
     this.check(this.where(), cx);
+    // 改完 index.md 后要刷新，异步回调里拿不到 cx，存一份。
+    this.lastCx = cx;
     const t = theme();
     const tab = (id, label) => h_flex().id(`abs-${id}`).h(24).px(9).flex_none().items_center().rounded(6).text_size(11.5)
       .bg(this.view === id ? t.selected : t.chrome).text_color(this.view === id ? t.foreground : t.muted)
       .hover((s) => s.bg(t.hover)).on_click((_e, cx) => { this.view = id; cx.notify(); }).child(label);
-    const body = this.view === "board" ? [this.boardCard(), this.logCard()] : this.view === "index" ? [this.indexCard()] : [this.logCard(), this.boardCard()];
+    // 图谱页把铁律放最上面，下面才是分类索引。
+    const body = this.view === "board" ? [this.boardCard(), this.logCard()]
+      : this.view === "index" ? [this.rulesCard(), this.indexCard()]
+      : [this.logCard(), this.boardCard()];
     return v_flex().id("abs-panel").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground)
       .child(h_flex().h(38).flex_none().px(12).gap(6).items_center().bg(t.chrome).border_b(1).border_color(t.border)
         .child(div().text_size(12.5).font_semibold().mr(4).child("ABS 记忆库"))
