@@ -240,13 +240,24 @@ export default class AbsPanel extends View {
     this.machine = null;
     this.confirmDelete = null;
     this.scriptText = null;
+    this.scriptPath = null;
     this.loadingScript = false;
+    // 会话页的错误单独存，不跟 .brain 的 note 混。
+    this.error = null;
+    // 扫描票号：定时器和手动刷新同时触发时，只认最新一轮。
+    this.scanTicket = 0;
+    // 本机有没有 node，探一次就够了。
+    this.hasNode = null;
+    // 扫描进行中标志，防止定时器和手动刷新叠跑。
+    this.scanning = false;
     this.note = null;
     this.watched = null;
     this.watchKey = null;
     this.refresh(cx);
     // 会话页：读扫描脚本，读完自己会扫一次；另外每 10 秒扫一轮。
     this.loadScript(cx);
+    // 立刻扫一次，不然要等第一个 10 秒定时器，界面一直空着。
+    this.sessRefresh(cx);
     cx.timer.every(10000, (cx) => this.sessRefresh(cx));
     // 快捷键 / 命令行能触发的命令：abs-panel.open-zed、abs-panel.open-code。
     cx.spawn(async (cx) => {
@@ -351,18 +362,22 @@ export default class AbsPanel extends View {
     if (!dir || this.brainOn || this.watched === dir) return;
     this.watched = dir;
     cx.spawn(async (cx) => {
-      // 目录被删或改名时 watchFolder 会报错。不能就此停掉，要接着试。
-      // 这里不能用 setTimeout：herdr-app 没提供它，只能用 cx.timer。
+      // 目录被删或改名时 watchFolder 会报错。不能就此停掉，停一下接着试。
+      // herdr-app 没有 setTimeout，只能用 cx.timer。
       while (this.watched === dir) {
+        let failed = false;
         try {
           await watchFolder(dir);
         } catch {
-          await new Promise((resolve) => cx.timer.after(5000, resolve));
-          continue;
+          failed = true;
         }
         if (this.watched !== dir) return;
-        this.refresh(cx);
-        cx.notify();
+        if (!failed) {
+          this.refresh(cx);
+          cx.notify();
+        }
+        // 失败时隔 5 秒再试，成功时 watchFolder 自己会等下一次变化。
+        if (failed) await new Promise((resolve) => cx.timer.after(5000, resolve));
       }
     });
   }
@@ -525,7 +540,7 @@ export default class AbsPanel extends View {
     if (this.brainOn || !this.brainDir) return;
     const path = `${this.brainDir}/index.md`;
     try {
-      const text = await readTextFile(path);
+      const text = await readTextFile(path).catch(() => null);
       if (text == null) { this.note = "读不到 index.md"; this.noteKind = "open"; return; }
       const next = change(text);
       if (next === text) return;
@@ -613,20 +628,29 @@ export default class AbsPanel extends View {
     }).catch(fail);
   }
 
-  // 会话扫描脚本的源码（远程要用）。readTextFile 在这套运行时里会挂住，所以用 cat。
+  // 扫描脚本在哪：mod 可能被装在别的目录名下，挨个试；结果缓存。
+  scanScriptCandidates() {
+    return [
+      `${appHome()}/mods/abs-panel/scripts/scan.js`,
+      `${appHome()}/mods/session-panel/scripts/scan.js`,
+    ];
+  }
+
+  // 读扫描脚本源码（远程要用）。remote 是本机时直接按路径跑，不需要源码。
   loadScript(cx) {
-    if (this.loadingScript) return;
+    if (this.loadingScript || this.scriptText) return;
     this.loadingScript = true;
-    const path = `${appHome()}/mods/abs-panel/scripts/scan.js`;
     cx.spawn(async (cx) => {
       try {
-        const r = await exec("cat", [path]);
-        if (r?.code === 0 && r.stdout) {
-          this.scriptText = r.stdout;
-          this.sessRefresh(cx);
+        for (const path of this.scanScriptCandidates()) {
+          const r = await exec("cat", [path]).catch(() => null);
+          if (r?.code === 0 && r.stdout) {
+            this.scriptPath = path;
+            this.scriptText = r.stdout;
+            this.sessRefresh(cx);
+            break;
+          }
         }
-      } catch {
-        this.scriptText = null;
       } finally {
         this.loadingScript = false;
         cx.notify();
@@ -634,20 +658,21 @@ export default class AbsPanel extends View {
     });
   }
 
-  // 会话页：整块就是一张卡片，里面是会话列表。
-  // 会话页：和别的页一样用 card()，样式统一。
   sessCards() {
     const t = theme();
     const list = this.sessVisible();
+    // 底色算一次就够，不用每行都算。
+    const bg = cardBg(t);
     const body = list.length
-      ? list.map((x) => this.sessRow(x))
+      ? list.map((x) => this.sessRow(x, bg))
       : [div().px(6).py(8).text_size(11.5).text_color(t.dim).child("这个文件夹没有会话")];
     return [this.card(this.machine ? `pi 会话 · ${this.machine}` : "pi 会话", list.length, body)];
   }
 
   sessTargets() {
-    const out = [{ on: this.sessOn() }];
-    const seen = new Set([this.sessOn() ?? "__local__"]);
+    const own = this.sessOn();
+    const out = [{ on: own }];
+    const seen = new Set([own ?? "__local__"]);
     for (const sp of spaces()) {
       const key = sp.machine ?? "__local__";
       if (seen.has(key)) continue;
@@ -664,34 +689,48 @@ export default class AbsPanel extends View {
       if (r.code !== 0) throw new Error((r.stderr || r.stdout || "扫描失败").trim().slice(0, 160));
       return JSON.parse((r.stdout || "").trim() || "{}").sessions ?? [];
     }
-    // 本机没装 node 就跳过，不算错误。
-    const probe = await exec("sh", ["-c", "command -v node >/dev/null 2>&1 && echo ok || echo missing"]);
-    if ((probe.stdout || "").trim() !== "ok") return [];
-    const r = await exec("node", [`${appHome()}/mods/abs-panel/scripts/scan.js`, "--limit", String(LIMIT)]);
+    // 本机没装 node 就跳过，不算错误。探一次就够了，不用每轮都探。
+    if (this.hasNode === null) {
+      const probe = await exec("sh", ["-c", "command -v node >/dev/null 2>&1 && echo ok || echo missing"]);
+      this.hasNode = (probe.stdout || "").trim() === "ok";
+    }
+    if (!this.hasNode) return [];
+    const path = this.scriptPath || this.scanScriptCandidates()[0];
+    const r = await exec("node", [path, "--limit", String(LIMIT)]);
     if (r.code !== 0) throw new Error((r.stderr || r.stdout || "扫描失败").trim().slice(0, 160));
     return JSON.parse((r.stdout || "").trim() || "{}").sessions ?? [];
   }
 
   sessRefresh(cx) {
+    // 上一轮还没跑完就跳过。远程扫描要几秒，10 秒定时器很容易叠在一起。
+    if (this.scanning) return;
+    this.scanning = true;
+    const ticket = ++this.scanTicket;
     cx.spawn(async (cx) => {
       const errors = [];
       let got = null;
-      for (const t of this.sessTargets()) {
-        try {
-          const list = await this.sessScanOn(t.on);
-          if (list.length) {
-            got = { on: t.on, list };
-            break;
+      try {
+        for (const t of this.sessTargets()) {
+          try {
+            const list = await this.sessScanOn(t.on);
+            if (list.length) {
+              got = { on: t.on, list };
+              break;
+            }
+          } catch (e) {
+            errors.push(String(e?.message || e).slice(0, 80));
           }
-        } catch (e) {
-          errors.push(String(e?.message || e).slice(0, 80));
         }
+        if (ticket !== this.scanTicket) return;
+        this.sessions = got?.list ?? [];
+        this.machine = got?.on ?? null;
+        // 扫到东西就不报错；一条都没扫到才把原因说出来。
+        this.error = got ? null : errors.join("；") || null;
+      } finally {
+        // 不管成没成都要放开，否则一次异常就永远不再扫了。
+        this.scanning = false;
+        cx.notify();
       }
-      this.sessions = got?.list ?? [];
-      this.machine = got?.on ?? null;
-      this.error = got ? null : errors.join("；") || null;
-      this.loading = false;
-      cx.notify();
     });
   }
 
@@ -716,6 +755,13 @@ export default class AbsPanel extends View {
   sessRemove(s, cx) {
     if (this.confirmDelete !== s.id) {
       this.confirmDelete = s.id;
+      // 5 秒内不再点就自动复位，免得一直挂在「删?」状态误触。
+      cx.timer.after(5000, (cx) => {
+        if (this.confirmDelete === s.id) {
+          this.confirmDelete = null;
+          cx.notify();
+        }
+      });
       cx.notify();
       return;
     }
@@ -723,12 +769,14 @@ export default class AbsPanel extends View {
     cx.notify();
     const on = this.machine;
     const safe = String(s.file).replace(/'/g, "'\\''");
+    const done = (msg) => {
+      // 先把结果记下来再刷新，否则 sessRefresh 会把错误覆盖掉。
+      if (msg) this.error = msg;
+      this.sessRefresh(cx);
+    };
     exec("sh", ["-c", `rm -f -- '${safe}'`], on ? { on } : undefined)
-      .then(() => this.sessRefresh(cx))
-      .catch((e) => {
-        this.error = `删除失败：${String(e?.message || e).slice(0, 100)}`;
-        this.sessRefresh(cx);
-      });
+      .then(() => done(null))
+      .catch((e) => done(`删除失败：${String(e?.message || e).slice(0, 100)}`));
   }
 
   sessVisible() {
@@ -736,13 +784,13 @@ export default class AbsPanel extends View {
     return this.sessions.filter((s) => norm(s.cwd) === here);
   }
 
-  sessRow(s) {
+  sessRow(s, bg) {
     const t = theme();
     const arming = this.confirmDelete === s.id;
     // 标题用会话开头那句，比「当前文件夹」有用。
     const title = s.preview || s.id;
     return v_flex().id(`sess-${s.id}`).w_full().flex_none().gap(3).px(7).py(6).rounded(8)
-      .bg(cardBg(t)).border_1().border_color(arming ? t.ansi1 : t.border).cursor_pointer()
+      .bg(bg).border_1().border_color(arming ? t.ansi1 : t.border).cursor_pointer()
       .hover((el) => el.bg(t.selection))
       .on_click((_e, cx) => this.sessResume(s, cx))
       .child(h_flex().gap(6).items_center()
@@ -780,9 +828,14 @@ export default class AbsPanel extends View {
         .child(div().flex_1())
         .child(div().id("abs-refresh").size(22).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim)
           .hover((s) => s.bg(t.hover).text_color(t.foreground))
-          .on_click((_e, cx) => this.refresh(cx)).child(div().text_size(13).child("↻"))))
+          .on_click((_e, cx) => {
+            // 会话页刷会话，其他页刷 .brain；两个都刷也不会多花多少。
+            this.refresh(cx);
+            this.sessRefresh(cx);
+          }).child(div().text_size(13).child("↻"))))
       .child(div().flex_1().min_h(0).overflow_y_scrollbar().p(10).child(v_flex().gap(10).w_full()
         .when(this.note != null, (e) => e.child(div().px(9).py(7).rounded(8).bg(t.raised).border_1().border_color(t.border).text_size(11).text_color(t.ansi3).child(this.note)))
+        .when(this.error != null, (e) => e.child(div().px(9).py(7).rounded(8).bg(t.raised).border_1().border_color(t.ansi1).text_size(11).text_color(t.ansi1).child(this.error)))
         .children(body)))
       .child(h_flex().h(26).flex_none().px(10).gap(6).items_center().border_t(1).border_color(t.border).text_size(10.5).text_color(t.dim)
         .child(div().flex_1().min_w(0).truncate().child((this.brainOn ? `${this.brainOn}:` : "") + (this.brainDir ?? (this.loading ? "读取中…" : "无 .brain"))))
