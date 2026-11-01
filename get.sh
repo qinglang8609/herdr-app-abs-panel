@@ -20,7 +20,7 @@ command -v curl >/dev/null 2>&1 || die "需要 curl"
 command -v tar >/dev/null 2>&1 || die "需要 tar"
 command -v python3 >/dev/null 2>&1 || die "需要 python3（改布局文件用）"
 
-[ -d "$HOME_DIR" ] || die "找不到 herdr-app 配置目录 $HOME_DIR，请先打开一次 herdr-app"
+[ -d "$HOME_DIR" ] || die "找不到 herdr-app 配置目录：$HOME_DIR （请先打开一次 herdr-app）"
 
 if ! command -v herdr-app >/dev/null 2>&1; then
   say "提醒：没找到 herdr-app 命令，装完后需要手动切到 abs 布局。"
