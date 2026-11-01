@@ -545,7 +545,6 @@ export default class AbsPanel extends View {
       : [this.logCard(), this.boardCard()];
     return v_flex().id("abs-panel").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground)
       .child(h_flex().h(38).flex_none().px(12).gap(6).items_center().bg(t.chrome).border_b(1).border_color(t.border)
-        .child(div().text_size(12.5).font_semibold().mr(4).child("ABS 记忆库"))
         .child(tab("board", "看板")).child(tab("index", "图谱")).child(tab("log", "日志"))
         .child(div().flex_1())
         .child(div().id("abs-refresh").size(22).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim)
