@@ -488,19 +488,26 @@ export default class AbsPanel extends View {
         .when(kids.length > shownKids.length, (el) => el.child(div().pl(6).text_size(10).text_color(t.dim).child(`还有 ${kids.length - shownKids.length} 条…`)))));
   }
 
+  // 看板：只放进行中的任务。徽章和空提示都去掉。
   boardCard() {
     const t = theme();
-    const doing = this.todo.doing ?? [], done = this.todo.done ?? [];
+    const doing = this.todo.doing ?? [];
     return this.card(
-      "看板",
-      `${doing.length} 进行中`,
-      [
-        ...(doing.length ? doing.map((task) => this.taskRow(task)) : [div().px(6).text_size(11.5).text_color(t.dim).child("没有进行中的任务")]),
-        ...(done.length ? [
-          div().px(6).mt(3).text_size(10.5).text_color(t.dim).child(`最近完成 ${done.length} 条`),
-          ...done.slice(0, 5).map((task) => this.taskRow(task)),
-        ] : []),
-      ],
+      "进行中",
+      null,
+      doing.length
+        ? doing.map((task) => this.taskRow(task))
+        : [div().w_full().py(10).text_size(11.5).text_color(t.dim).text_center().child("没有进行中的任务")],
+    );
+  }
+
+  // 最近完成：单独一张卡，与看板并列。
+  doneCard() {
+    const done = this.todo.done ?? [];
+    return this.card(
+      "最近完成",
+      done.length || null,
+      done.length ? done.slice(0, 5).map((task) => this.taskRow(task)) : [div().px(6).py(4)],
     );
   }
 
@@ -845,9 +852,9 @@ export default class AbsPanel extends View {
       .hover((s) => s.bg(t.hover)).on_click((_e, cx) => { this.view = id; cx.notify(); }).child(label);
     // 图谱页把铁律放最上面，下面才是分类索引。
     const body = this.view === "sessions" ? this.sessCards()
-      : this.view === "board" ? [this.boardCard(), this.logCard()]
+      : this.view === "board" ? [this.boardCard(), this.doneCard(), this.logCard()]
       : this.view === "index" ? [this.rulesCard(), this.indexCard()]
-      : [this.logCard(), this.boardCard()];
+      : [this.logCard(), this.boardCard(), this.doneCard()];
     return v_flex().id("abs-panel").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground)
       .child(h_flex().h(38).flex_none().px(12).gap(6).items_center().bg(t.chrome).border_b(1).border_color(t.border)
         .child(tab("sessions", "会话")).child(tab("board", "看板")).child(tab("index", "图谱")).child(tab("log", "日志"))
