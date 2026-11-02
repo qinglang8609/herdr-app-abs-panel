@@ -29,16 +29,6 @@ function sizeText(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)}M`;
 }
 
-// 卡片底色：要比面板底明显深一档，主题里的 ansi0 只深一点点，看不出来。
-function cardBg(t) {
-  const bg = String(t.background || "").toLowerCase();
-  const m = /^#([0-9a-f]{6})$/.exec(bg);
-  const dark = m
-    ? (parseInt(m[1].slice(0, 2), 16) * 0.299 + parseInt(m[1].slice(2, 4), 16) * 0.587 + parseInt(m[1].slice(4, 6), 16) * 0.114) < 128
-    : true;
-  return dark ? "#16171d" : "#ececf0";
-}
-
 // 自带 UTF-8 + base64：这套运行时没有 TextEncoder / btoa。
 function utf8Bytes(str) {
   const out = [];
@@ -698,8 +688,8 @@ export default class AbsPanel extends View {
   sessCards() {
     const t = theme();
     const list = this.sessVisible();
-    // 底色算一次就够，不用每行都算。
-    const bg = cardBg(t);
+    // 和看板/图谱/日志用同一个底色，四页统一。
+    const bg = t.background;
     const body = list.length
       ? list.map((x) => this.sessRow(x, bg))
       : [div().px(6).py(8).text_size(11.5).text_color(t.dim).child("这个文件夹没有会话")];
@@ -821,17 +811,17 @@ export default class AbsPanel extends View {
     return this.sessions.filter((s) => norm(s.cwd) === here);
   }
 
+  // 和看板/日志的行用同一套尺寸：gap 2 / px 6 / py 5 / rounded 7。
   sessRow(s, bg) {
     const t = theme();
     const arming = this.confirmDelete === s.id;
-    // 标题用会话开头那句，比「当前文件夹」有用。
     const title = s.preview || s.id;
-    return v_flex().id(`sess-${s.id}`).w_full().flex_none().gap(3).px(7).py(6).rounded(8)
+    return v_flex().id(`sess-${s.id}`).w_full().flex_none().gap(2).px(6).py(5).rounded(7)
       .bg(bg).border_1().border_color(arming ? t.ansi1 : t.border).cursor_pointer()
-      .hover((el) => el.bg(t.selection))
+      .hover((el) => el.bg(t.hover))
       .on_click((_e, cx) => this.sessResume(s, cx))
       .child(h_flex().gap(6).items_center()
-        .child(div().flex_1().min_w(0).truncate().text_size(12).font_semibold().text_color(t.foreground).child(title))
+        .child(div().flex_1().min_w(0).truncate().text_size(12.5).font_semibold().text_color(t.foreground).child(title))
         .child(div().text_size(10).flex_none().text_color(t.dim).child(ago(s.mtime)))
         // 删除按钮：点自己不冒泡到整行的「恢复」
         .child(h_flex().id(`del-${s.id}`).h(16).px(4).flex_none().items_center().rounded(4)
@@ -840,10 +830,9 @@ export default class AbsPanel extends View {
           .on_click((_e, cx) => { cx.stop_propagation(); this.sessRemove(s, cx); })
           .child(div().text_size(9.5).text_color(arming ? t.background : t.dim).child(arming ? "删?" : "×"))))
       .child(h_flex().gap(6).items_center()
-        .child(div().flex_1().min_w(0).truncate().text_size(9.5).text_color(t.dim).child(s.id))
-        .child(div().text_size(9.5).flex_none().text_color(t.dim).child(sizeText(s.size))));
+        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.muted).child(s.id))
+        .child(div().text_size(10).flex_none().text_color(t.dim).child(sizeText(s.size))));
   }
-
 
   render(cx) {
     // 空间/pane 一换，spaces() 和 focused() 变了就会重渲染；这里立刻跟上，不等定时器。
