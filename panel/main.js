@@ -74,8 +74,9 @@ function remoteScanCommand(scriptText, limit) {
 // - [ ] [进行中] id [[作者]] — 标题 (认领 2026-11-01 会话)
 // - [x] id [[作者]] — 标题 — 结语 【落地】 (完成 2026-10-22 会话)
 function parseTodo(text) {
-  // Done 段在 todo.md 里是按 `### 日期` 归档的，日期是重要信息，不能拍平丢掉。
-  const out = { doing: [], done: [], doneGroups: [], doingTitle: "Todo" };
+  // 只收「进行中」和「已完成」两段。Done 段的 `### 日期` 只用来给任务带上日期，
+  // 不在面板里单独分组显示。
+  const out = { doing: [], done: [], doingTitle: "Todo" };
   let group = "";
   let archived = false;
   let date = "";
@@ -99,10 +100,6 @@ function parseTodo(text) {
       archived = name === "Archived";
       date = name;
       currentGroup = null;
-      if (!archived && group === "done") {
-        currentGroup = { date: name, tasks: [] };
-        out.doneGroups.push(currentGroup);
-      }
       continue;
     }
     if (/^\s*-\s/.test(raw) && line !== raw.trimStart()) {
@@ -120,7 +117,6 @@ function parseTodo(text) {
     if (!task) continue;
     task.date = task.date || date;
     out[task.group].push(task);
-    if (task.group === "done" && currentGroup) currentGroup.tasks.push(task);
   }
   return out;
 }
@@ -434,9 +430,11 @@ export default class AbsPanel extends View {
 
   // 三色：绿=进行中，红=暂停（滞留/搁置），橙=完成。
   // 看 checkbox 本身而不是所在区：Done 区里也可能有没做完的 [ ] 行。
+  // 圆点颜色：完成=绿，暂停=红，进行中=绿（进行中本来就该是绿的）。
+  // 三种卡片（看板任务、图谱分类、日志）都用绿色表示“已完成/正常”，保持一致。
   stateColor(task) {
     const t = theme();
-    if (task.done) return t.ansi3;
+    if (task.done) return t.ansi2;
     const paused = /滞留|搁置|讨论中/.test(task.state ?? "");
     return paused ? t.ansi1 : t.ansi2;
   }
@@ -493,6 +491,8 @@ export default class AbsPanel extends View {
       .child(h_flex().gap(6).items_center()
         .child(div().size(7).flex_none().rounded(4).bg(dot))
         .child(div().flex_1().min_w(0).truncate().text_size(11).font_semibold().text_color(t.foreground).child(task.title))
+        // 状态标签：进行中 / 讨论中 / 滞留中 / 搁置，todo.md 里写了哪个就显示哪个
+        .when(Boolean(task.state), (e) => e.child(div().px(5).rounded(4).bg(t.chrome).text_size(9.5).text_color(t.muted).child(task.state)))
         .when(kids.length > 0, (e) => e.child(div().text_size(9.5).text_color(t.dim).child(`${kids.length} 子项`))))
       .child(h_flex().gap(6).items_center()
         .child(div().flex_1().min_w(0).truncate().text_size(10).text_color(t.muted).child(detail))
@@ -519,23 +519,6 @@ export default class AbsPanel extends View {
   }
 
   // 最近完成：单独一张卡，与看板并列。
-  // 最近完成：按日期分组，todo.md 的 Done 段是按天归档的。
-  doneCard() {
-    const t = theme();
-    const groups = this.todo.doneGroups ?? [];
-    const total = this.todo.done?.length ?? 0;
-    const body = [];
-    for (const g of groups) {
-      if (!g.tasks?.length) continue;
-      body.push(h_flex().flex_none().px(6).py(3).gap(6).items_center()
-        .child(div().text_size(9.5).text_color(t.dim).child(g.date))
-        .child(div().flex_1().h(1).bg(t.border)));
-      for (const task of g.tasks) body.push(this.taskRow(task));
-    }
-    if (!body.length) body.push(div().w_full().py(10).text_size(10).text_color(t.dim).text_center().child("还没有完成的任务"));
-    return this.card("最近完成", total, body);
-  }
-
   indexCard() {
     const t = theme();
     // index.md 里出现的每个 ## 分类都列出来，空的也列（显示 0 页），
@@ -888,7 +871,7 @@ export default class AbsPanel extends View {
       .hover((s) => s.bg(t.hover)).on_click((_e, cx) => { this.view = id; cx.notify(); }).child(label);
     // 图谱页把铁律放最上面，下面才是分类索引。
     const body = this.view === "sessions" ? this.sessCards()
-      : this.view === "board" ? [this.boardCard(), this.doneCard(), this.logCard()]
+      : this.view === "board" ? [this.boardCard(), this.logCard()]
       : this.view === "index" ? [this.rulesCard(), this.indexCard()]
       : [this.logCard()];
     return v_flex().id("abs-panel").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground)
