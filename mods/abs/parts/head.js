@@ -53,27 +53,30 @@ async function openIn(choice) {
   const bin = choice === "zed"
     ? "/Applications/Zed.app/Contents/MacOS/cli"
     : "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code";
-  const fail = (err) => notify({
-    title: `Couldn't open ${e[1]}${on ? ` on ${on}` : ""}`,
-    body: String(err && (err.stderr || err.message || err)).trim().split("\n")[0] || "Is it installed?",
-    level: "error",
-  });
   if (!on) {
-    exec(bin, [dir]).catch(fail);
+    exec(bin, [dir]).catch((err) => notify({ title: `Couldn't open ${e[1]}`, body: String(err).split("\n")[0], level: "error" }));
     return;
   }
-  // 机器名（fnos）和 ssh 别名（FNOS）不一，先查 hc 拿 target。
+  // 主机名候选：机器名、大写形式，再到 hc 里查这台机器的 target。
+  const hosts = [on, String(on).toUpperCase()];
+  const open = (host) => choice === "zed"
+    ? [`ssh://${host}${dir}`]
+    : ["--remote", `ssh-remote+${host}`, dir];
+  for (const host of hosts) {
+    exec(bin, open(host)).catch(() => null);
+  }
   hc(["machine", "ls"]).then((r) => {
-    let host = on;
-    try {
-      const name = String(on).toLowerCase();
-      for (const m of JSON.parse(r.stdout).machines) {
-        if (String(m.name).toLowerCase() === name) { host = m.target || m.name; break; }
+    const want = String(on).toLowerCase();
+    for (const m of JSON.parse(r.stdout).machines) {
+      if (String(m.name).toLowerCase() === want) {
+        const t = m.target || m.name;
+        if (!hosts.some((h) => h.toLowerCase() === String(t).toLowerCase())) {
+          exec(bin, open(t)).catch(() => null);
+        }
+        break;
       }
-    } catch { /* 查不到就用原名 */ }
-    const args = choice === "zed" ? [`ssh://${host}${dir}`] : ["--remote", `ssh-remote+${host}`, dir];
-    return exec(bin, args);
-  }).catch(fail);
+    }
+  }).catch(() => null);
 }
 
 function button(t, id, children, onClick, { tip, framed = true, on = false, hoverBg = true } = {}) {
