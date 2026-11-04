@@ -2,7 +2,7 @@
 // 目录从当前空间的工作目录往上找 .brain，找不到就用 ~/.brain。
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, panes, focused, readTextFile, writeTextFile, watchFolder, exec, hc, theme, home, run, appHome, openOverlay, nextCommand } from "herdr";
+import { spaces, panes, focused, readTextFile, writeTextFile, watchFolder, exec, hc, theme, home, run, appHome, openOverlay, nextCommand, shared } from "herdr";
 
 // ── 会话（pi 历史）───────────────────────
 
@@ -78,14 +78,12 @@ function parseTodo(text) {
   // 不在面板里单独分组显示。
   const out = { doing: [], done: [], doingTitle: "Todo" };
   let group = "";
-  let archived = false;
   let date = "";
   let currentGroup = null;
   for (const raw of text.split("\n")) {
     const line = raw.replace(/\s+$/, "");
     if (line.startsWith("## ")) {
       const name = line.slice(3).trim();
-      archived = false;
       currentGroup = null;
       if (name === "Done") group = "done";
       else if (!out.seen) {
@@ -97,7 +95,6 @@ function parseTodo(text) {
     }
     if (line.startsWith("### ")) {
       const name = line.slice(4).trim();
-      archived = name === "Archived";
       date = name;
       currentGroup = null;
       continue;
@@ -112,7 +109,7 @@ function parseTodo(text) {
       }
       continue;
     }
-    if (!line.startsWith("- ") || archived) continue;
+    if (!line.startsWith("- ")) continue;
     const task = parseTask(line, group === "doing" ? "doing" : "done");
     if (!task) continue;
     task.date = task.date || date;
@@ -131,12 +128,23 @@ function parseTask(line, group) {
     if (st) { state = st[1]; body = body.slice(st[0].length); }
   }
   if (!body.includes("[[")) return null;
+  // `- [[log-2026-10-30]] 完成任务 1 条`：方括里的是 id，后面才是说明。
+  const linked = /^\[\[([^\]]+)\]\]\s*(.*)$/.exec(body);
+  if (linked) {
+    return {
+      group, done: true, state: "", id: linked[1], who: "", date: "",
+      title: linked[2] || linked[1], note: "", verdict: "",
+      kids: 0, children: [], line: line.trim(),
+    };
+  }
   const noteAt = body.indexOf(" — ");
   const main = noteAt < 0 ? body : body.slice(0, noteAt);
   const note = noteAt < 0 ? "" : body.slice(noteAt + 3);
   const id = (main.trim().split(/\s+/)[0] || "");
   const who = /\[\[([^\]]+)\]\]/.exec(main)?.[1] ?? "";
-  const date = /\(认领 ([^)]*)\)/.exec(main)?.[1] ?? /\(完成 ([^)]*)\)/.exec(note)?.[1] ?? "";
+  // `(完成 2026-11-02 01a19a68-41a9-71)`：只取日期，后面那串是缓存 id。
+  const stamp = /\(认领 ([^)]*)\)/.exec(main)?.[1] ?? /\(完成 ([^)]*)\)/.exec(note)?.[1] ?? "";
+  const date = (/\d{4}-\d{2}-\d{2}/.exec(stamp) ?? [""])[0];
   let title = main;
   for (const cut of ["[[", "(认领 "]) {
     const at = title.indexOf(cut);
@@ -272,6 +280,16 @@ export default class AbsPanel extends View {
     this.sessions = [];
     this.machine = null;
     this.confirmDelete = null;
+    this.hoveredSess = null;
+    this.logOpen = null;   // 展开的日志 id
+    this.logTasks = [];    // 它里面的任务
+    this.linkedTasks = []; // 所有双链日志里解析出的任务，平铺在已完成里
+    this.linkedFor = null; // 已经读过哪一份 todo
+    this.linkedLoading = null; // 正在读的那份
+    this.boardPage = 0;    // 看板「已完成」翻到第几页
+    this.sessPage = 0;     // 会话列表翻到第几页
+    this.timerView = null; // 当前给哪一页起着刷新表
+    this.stops = [];       // 那些表的 Task，切页时 cancel
     this.scriptText = null;
     this.scriptPath = null;
     this.loadingScript = false;
@@ -287,11 +305,9 @@ export default class AbsPanel extends View {
     this.watched = null;
     this.watchKey = null;
     this.refresh(cx);
-    // 会话页：读扫描脚本，读完自己会扫一次；另外每 10 秒扫一轮。
     this.loadScript(cx);
-    // 立刻扫一次，不然要等第一个 10 秒定时器，界面一直空着。
     this.sessRefresh(cx);
-    cx.timer.every(10000, (cx) => this.sessRefresh(cx));
+    // 定时器跟着当前面板走，见 syncTimers()。
     // 快捷键 / 命令行能触发的命令：abs-panel.open-zed、abs-panel.open-code。
     cx.spawn(async (cx) => {
       for (;;) {
@@ -302,8 +318,7 @@ export default class AbsPanel extends View {
         cx.notify();
       }
     });
-    // 5 秒一轮：工作目录换了、.brain 改了都在这轮里发现。
-    cx.timer.every(5000, (cx) => this.refresh(cx));
+    // 定时器由 syncTimers() 按当前面板启停。
   }
 
   // 当前落点：聚焦 pane 的目录、空间目录，以及它所在的机器（null = 本机）。
@@ -322,14 +337,51 @@ export default class AbsPanel extends View {
     this.refresh(cx);
   }
 
+  // 只让「当前这一页」定时刷新。切走就停掉，切回来先立刻刷一次再重新起表。
+  syncTimers(cx) {
+    const view = shared("abs.view") ?? this.view ?? "sessions";
+    if (view === this.timerView) return;
+    this.timerView = view;
+
+    // 停掉上一页的表（Task.cancel）。
+    for (const task of this.stops ?? []) {
+      try {
+        task?.cancel?.();
+      } catch {}
+    }
+    this.stops = [];
+
+    // 先刷一次，再起 5 秒表。
+    this.refresh(cx);
+    if (view === "sessions") this.sessRefresh(cx);
+
+    const stops = [];
+    if (view === "sessions") {
+      stops.push(cx.timer.every(5000, (cx) => this.sessRefresh(cx)));
+    } else {
+      stops.push(cx.timer.every(5000, (cx) => this.refresh(cx)));
+    }
+    this.stops = stops.filter(Boolean);
+  }
+
+  // 当前该刷哪一页：sessions/board → todo，index → index，log → log。
+  // 一次只读一份，别的不碰。读完才替换，失败就保留旧列表（不会变空）。
+  wantFile(view) {
+    if (view === "index") return "index.md";
+    if (view === "log") return "log.md";
+    return "todo.md";
+  }
+
   refresh(cx) {
     // 定时器、目录监听、切目录会同时叫；只留最新一轮，旧的结果丢掉。
     const ticket = (this.refreshTicket ?? 0) + 1;
     this.refreshTicket = ticket;
     const at = this.where();
     const context = `${at.on ?? ""}|${at.dir ?? ""}`;
-    // 提示只在「它属于这类消息」时清，不要抹掉 openIn 写的错误。
+    const view = shared("abs.view") ?? this.view;
+    const file = this.wantFile(view);
     if (this.noteKind === "read") this.note = null;
+
     cx.spawn(async (cx) => {
       try {
         const dir = await this.findBrain(at);
@@ -338,19 +390,28 @@ export default class AbsPanel extends View {
         this.brainOn = dir ? at.on : null;
         if (dir !== this.watched) this.watched = null;
         this.watch(cx);
-        const read = (name) => dir ? readTextFile(`${dir}/${name}`, { on: at.on }).catch(() => null) : Promise.resolve(null);
-        const [todo, index, log] = await Promise.all([read("todo.md"), read("index.md"), read("log.md")]);
+        if (!dir) {
+          this.loading = false;
+          if (this.note == null) { this.note = "没找到 .brain 目录"; this.noteKind = "read"; }
+          cx.notify();
+          return;
+        }
+        const text = await readTextFile(`${dir}/${file}`, { on: at.on }).catch(() => null);
         if (ticket !== this.refreshTicket || context !== this.keyNow()) return;
-        this.todo = todo ? parseTodo(todo) : { doing: [], done: [] };
-        this.index = index ? parseIndex(index) : { sections: [], rules: [] };
-        this.log = log ? parseLog(log) : [];
-        // findBrain 自己写的原因（比如连不上机器）优先于「没找到」。
-        if (dir) { this.note = null; this.noteKind = null; }
-        else if (this.note == null) { this.note = "没找到 .brain 目录"; this.noteKind = "read"; }
+
+        // 读不到就留着旧数据，不替换成空。
+        if (text != null) {
+          if (file === "index.md") this.index = parseIndex(text);
+          else if (file === "log.md") this.log = parseLog(text);
+          else this.todo = parseTodo(text);
+          this.note = null;
+          this.noteKind = null;
+        }
+        this.loading = false;
       } catch (e) {
         if (ticket === this.refreshTicket) { this.note = String(e); this.noteKind = "open"; }
-      } finally {
         this.loading = false;
+      } finally {
         cx.notify();
       }
     });
@@ -417,21 +478,41 @@ export default class AbsPanel extends View {
 
   // ── 卡片 ───────────────────────────────
 
-  card(title, badge, body) {
+  // `fill`: the card takes the height it is given and its own body scrolls,
+  // instead of the card growing and the panel scrolling as a whole.
+  // `fill`: 0 keeps the card as tall as its content; above 0 the card takes
+  // that share of the free height and its own body scrolls instead.
+  // `footer`: pinned under the scrolling body, so paging stays put.
+  card(title, badge, body, fill = 0, footer = null) {
     const t = theme();
-    return v_flex().w_full().flex_none().rounded(10).overflow_hidden().bg(t.raised)
+    return v_flex().w_full().rounded(10).overflow_hidden().bg(t.background)
       .border_1().border_color(t.border)
+      .when(fill > 0, (e) => e.flex_grow(fill).flex_basis(0).min_h(0), (e) => e.flex_none())
       .child(h_flex().h(32).flex_none().px(9).gap(6).items_center().border_b(1).border_color(t.border)
         .child(div().text_size(11).font_semibold().text_color(t.foreground).child(title))
         .when(badge != null, (e) => e.child(div().px(5).rounded(4).bg(t.chrome).text_size(9.5).text_color(t.muted).child(String(badge))))
         .child(div().flex_1()))
-      .child(v_flex().px(4).py(5).gap(3).children(body));
+      .child(
+        fill > 0
+          ? div().flex_1().min_h(0).overflow_y_scrollbar().child(v_flex().px(4).py(5).gap(6).w_full().children(body))
+          : v_flex().px(4).py(5).gap(6).children(body),
+      )
+      .when(footer != null, (e) => e.child(footer));
   }
 
   // 三色：绿=进行中，红=暂停（滞留/搁置），橙=完成。
   // 看 checkbox 本身而不是所在区：Done 区里也可能有没做完的 [ ] 行。
   // 圆点颜色：完成=绿，暂停=红，进行中=绿（进行中本来就该是绿的）。
   // 三种卡片（看板任务、图谱分类、日志）都用绿色表示“已完成/正常”，保持一致。
+  // 状态标签的底色：进行中=绿，讨论中=橙，滞留/搁置/暂停=红。字都是白的。
+  stateBadge(t, state) {
+    const s = state ?? "";
+    if (/讨论中/.test(s)) return "#e8871e";   // 正橙
+    if (/滞留|搁置|暂停/.test(s)) return "#d1495b"; // 红
+    if (/进行中/.test(s)) return "#2e7d4f";   // 深绿
+    return t.chrome;
+  }
+
   stateColor(task) {
     const t = theme();
     if (task.done) return t.ansi2;
@@ -440,9 +521,78 @@ export default class AbsPanel extends View {
   }
 
   // 点开详情：任务带全文与子项，图谱与日志各自带上自己的正文。
+  // 双链 `[[log-YYYY-MM-DD]]` 指向 .brain/sessions/<id>.md：读出任务明细。
+  // 看板里的 `[[log-YYYY-MM-DD]]` 双链：把每个 sessions/<id>.md 里的任务都读出来，
+  // 平铺进「已完成」，不再只占一行「完成任务 N 条」。
+  // 看板里的 `[[log-YYYY-MM-DD]]` 双链：并发读每一份 sessions/<id>.md，解析成任务。
+  // 结果按 todo 的链接列表缓存，链接没变就不再读；正在读时也不再起一轮。
+  async loadLinked(todo) {
+    const links = [...(todo.doing ?? []), ...(todo.done ?? [])]
+      .map((x) => x?.id)
+      .filter((id) => id && String(id).startsWith("log-"));
+    const key = links.join(",");
+    if (key === this.linkedFor || key === this.linkedLoading) return;
+    if (links.length === 0) {
+      this.linkedFor = key;
+      this.linkedTasks = [];
+      return;
+    }
+
+    this.linkedLoading = key;
+    const on = this.brainOn;
+    const base = this.brainDir || `${home()}/.brain`;
+    // 并发读，别一个等一个；远程机器上串行会慢到看得出卡。
+    const texts = await Promise.all(
+      links.map((id) => readTextFile(`${base}/sessions/${id}.md`, { on }).catch(() => null)),
+    );
+    this.linkedLoading = null;
+    // 读的这一轮已经被更新的一轮取代，结果丢掉。
+    if (this.linkedFor === key) return;
+
+    const out = [];
+    for (let i = 0; i < links.length; i += 1) {
+      const text = texts[i];
+      if (!text) continue;
+      const parsed = parseTodo(text);
+      const fresh = [...parsed.doing, ...parsed.done].filter((x) => x && !String(x.id).startsWith("log-"));
+      for (const x of fresh) out.push({ ...x, from: links[i] });
+    }
+    this.linkedFor = key;
+    this.linkedTasks = out;
+    this.lastCx?.notify?.();
+  }
+
+  // 双链 `[[log-YYYY-MM-DD]]` 指向 .brain/sessions/<id>.md：把里面的任务读出来，
+  // 展开在卡片里（再点一次收起），不弹窗。
+  async toggleLog(id, cx) {
+    if (this.logOpen === id) {
+      this.logOpen = null;
+      this.logTasks = [];
+      cx?.notify?.();
+      return;
+    }
+    this.logOpen = id;
+    this.logTasks = [];
+    cx?.notify?.();
+
+    const on = this.brainOn;
+    const base = this.brainDir || `${home()}/.brain`;
+    const text = await readTextFile(`${base}/sessions/${id}.md`, { on }).catch(() => null);
+    if (this.logOpen !== id) return;
+    const parsed = text ? parseTodo(text) : { doing: [], done: [] };
+    this.logTasks = [...parsed.doing, ...parsed.done].filter((x) => x && !String(x.id).startsWith("log-"));
+    this.logMissing = text ? null : `${base}/sessions/${id}.md 读不到`;
+    cx?.notify?.() ?? this.lastCx?.notify?.();
+  }
+
   openDetail(kind, item) {
     const t = theme();
     if (kind === "task") {
+      // `[[log-2026-10-30]]` 这种是双链：去 .brain/sessions 里读那份记录。
+      if (item.id && item.id.startsWith("log-")) {
+        this.toggleLog(item.id, this.lastCx);
+        return;
+      }
       const meta = [item.state, item.verdict, item.id, item.who, item.date].filter(Boolean);
       const body = [
         ...(item.note ? [item.note] : []),
@@ -477,45 +627,182 @@ export default class AbsPanel extends View {
   }
 
   // 一条任务：名字最大，下面是说明；左上角圆点看状态，子项缩进列在下面。
+  // 三行：标题 / 描述 / 时间与子项数。子项缩进列在下面。
+  // 只有三行：标题 / 描述 / 时间 + 右侧状态与子项数。子项明细点开弹窗看。
   taskRow(task) {
     const t = theme();
     const dot = this.stateColor(task);
-    const detail = task.note || task.title;
+    // 描述里去掉【结论】和 (完成 ...) 尾巴，那些已经有自己的位置或不要了。
+    const cleanNote = (task.note ?? "")
+      .replace(/【[^】]*】/g, "")
+      .replace(/\(完成 [^)]*\)/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    const detail = cleanNote && cleanNote !== task.title ? cleanNote : "";
     const kids = task.children ?? [];
-    // 子项多时只列前 3 条，其余点开详情看。
-    const shownKids = kids.slice(0, 3);
-    return v_flex().w_full().flex_none().gap(2).px(6).py(5).rounded(7).bg(t.background)
-      .border_1().border_color(t.border).cursor_pointer()
-      .hover((s) => s.bg(t.hover))
+    return v_flex().w_full().flex_none().gap(3).px(7).py(6).rounded(7).bg(t.raised)
+      .cursor_pointer()
+      .hover((s) => s.bg(t.chrome))
       .on_click(() => this.openDetail("task", task))
+      // 第一行：状态点 + 标题，右侧是状态标签和子项数。
       .child(h_flex().gap(6).items_center()
-        .child(div().size(7).flex_none().rounded(4).bg(dot))
+        .child(div().size(6).flex_none().rounded(3).bg(dot))
         .child(div().flex_1().min_w(0).truncate().text_size(11).font_semibold().text_color(t.foreground).child(task.title))
-        // 状态标签：进行中 / 讨论中 / 滞留中 / 搁置，todo.md 里写了哪个就显示哪个
-        .when(Boolean(task.state), (e) => e.child(div().px(5).rounded(4).bg(t.chrome).text_size(9.5).text_color(t.muted).child(task.state)))
-        .when(kids.length > 0, (e) => e.child(div().text_size(9.5).text_color(t.dim).child(`${kids.length} 子项`))))
-      .child(h_flex().gap(6).items_center()
-        .child(div().flex_1().min_w(0).truncate().text_size(10).text_color(t.muted).child(detail))
-        .when(Boolean(task.verdict), (e) => e.child(div().text_size(9.5).text_color(dot).child(task.verdict))))
-      // 子项：缩进 + 左侧竖线，看得出从属于上面这条
-      .when(shownKids.length > 0, (e) => e.child(v_flex().mt(2).pl(9).gap(1)
-        .children(shownKids.map((kid) => h_flex().gap(5).items_center()
-          .child(div().w(1).h(11).flex_none().rounded(1).bg(kid.done ? t.ansi3 : t.border))
-          .child(div().flex_1().min_w(0).truncate().text_size(10).text_color(kid.done ? t.dim : t.muted).child(kid.text))))
-        .when(kids.length > shownKids.length, (el) => el.child(div().pl(6).text_size(9.5).text_color(t.dim).child(`还有 ${kids.length - shownKids.length} 条…`)))));
+        .when(Boolean(task.state), (e) => e.child(div().flex_none().px(5).py(1).rounded(4).bg(this.stateBadge(t, task.state)).text_size(9).text_color("#ffffff").child(task.state))))
+      // 第二行：描述，没有就不画这一行
+      .when(Boolean(detail), (e) =>
+        e.child(div().w_full().min_w(0).truncate().text_size(9).text_color(t.dim).child(detail)),
+      )
+      // 第三行：只有日期就画，没有就不占位置。
+      .when(Boolean(task.date), (e) =>
+        e.child(div().w_full().text_size(9).text_color(t.dim).child(task.date)),
+      )
+      // 子项：在下面按树形列出来，最后一条用 └─。
+      .when(kids.length > 0, (e) =>
+        e.child(
+          v_flex()
+            .w_full()
+            .mt(2)
+            .gap(1)
+            .children(
+              kids.map((kid, i) =>
+                h_flex()
+                  .gap(3)
+                  .items_center()
+                  .child(
+                    div()
+                      .flex_none()
+                      .text_size(9)
+                      .text_color(t.dim)
+                      .child(`${i === kids.length - 1 ? "└─" : "├─"} ${kid.done ? "☑" : "☐"}`),
+                  )
+                  .child(div().flex_1().min_w(0).truncate().text_size(9.5).text_color(kid.done ? t.dim : t.muted).child(kid.text)),
+              ),
+            ),
+        ),
+      )
+      // 双链展开：把 sessions/<id>.md 里的任务缩进列在下面。
+      .when(this.logOpen === task.id, (e) =>
+        e.child(
+          v_flex()
+            .w_full()
+            .mt(2)
+            .pl(9)
+            .gap(2)
+            .when(Boolean(this.logMissing), (x) => x.child(div().text_size(9).text_color(t.ansi1).child(this.logMissing)))
+            .when(this.logTasks.length === 0 && !this.logMissing, (x) => x.child(div().text_size(9).text_color(t.dim).child("这份记录里没有任务")))
+            .children(
+              this.logTasks.map((x) =>
+                v_flex()
+                  .w_full()
+                  .gap(1)
+                  .child(
+                    h_flex()
+                      .gap(5)
+                      .items_center()
+                      .child(div().w(1).h(11).flex_none().rounded(1).bg(x.done ? t.ansi3 : t.border))
+                      .child(div().flex_1().min_w(0).truncate().text_size(10).text_color(t.muted).child(x.title))
+                      .when(Boolean(x.verdict), (el) => el.child(div().text_size(9).text_color(t.dim).child(x.verdict))),
+                  )
+                  .when(Boolean(x.note && x.note !== x.title), (el) =>
+                    el.child(div().pl(6).text_size(9).text_color(t.dim).truncate().child(x.note)),
+                  )
+                  .children((x.children ?? []).map((k) =>
+                    div().pl(6).text_size(9).text_color(t.dim).truncate().child(`${k.done ? "☑" : "☐"} ${k.text}`),
+                  )),
+              ),
+            ),
+        ),
+      );
   }
 
   // 看板：只放进行中的任务。徽章和空提示都去掉。
-  boardCard() {
+  // 一段小标题：左边名字，右边条数。
+  sectionHead(t, label, count) {
+    return h_flex()
+      .w_full()
+      .flex_none()
+      .px(7)
+      .pt(8)
+      .pb(3)
+      .gap(6)
+      .items_center()
+      .child(div().text_size(10.5).font_semibold().text_color(t.muted).child(label))
+      .child(div().text_size(9).text_color(t.dim).child(String(count)))
+      .child(div().flex_1());
+  }
+
+  // 看板：一张卡片，先「进行中」再「已完成」，整张卡片一起滚。
+  boardCard(fill = 1) {
     const t = theme();
     const doing = this.todo.doing ?? [];
+    // 「完成任务 N 条」这类双链行换成它指向的真实任务：去掉链接行，换成 sessions 里读到的。
+    const done = (this.todo.done ?? []).filter((x) => !String(x?.id ?? "").startsWith("log-"));
+    const linked = this.linkedTasks ?? [];
+    // 异步读，读到后自己 notify；这里不等它，渲染不被它拖住。
+    void this.loadLinked(this.todo ?? {});
+
+    const all = [...done, ...linked];
+    const PER = 20;
+    const pages = Math.max(1, Math.ceil(all.length / PER));
+    const page = Math.min(Math.max(0, this.boardPage ?? 0), pages - 1);
+    const shown = all.slice(page * PER, page * PER + PER);
+
+    // 翻页条钉在卡片底部，不跟着列表滚。
+    const btn = (id, label, to, on) =>
+      h_flex()
+        .id(id)
+        .h(20)
+        .px(8)
+        .flex_none()
+        .items_center()
+        .rounded(6)
+        .bg(t.chrome)
+        .text_color(on ? t.foreground : t.dim)
+        .when(on, (x) => x.cursor_pointer().hover((y) => y.bg(t.hover)))
+        .on_click((_e, cx) => {
+          if (!on) return;
+          this.boardPage = to;
+          cx.notify();
+        })
+        .child(div().text_size(9.5).child(label));
+    const footer =
+      pages > 1
+        ? h_flex()
+            .w_full()
+            .flex_none()
+            .h(32)
+            .px(8)
+            .gap(8)
+            .items_center()
+            .justify_center()
+            .border_t(1)
+            .border_color(t.border)
+            .child(btn("abs-board-prev", "‹ Prev", page - 1, page > 0))
+            .child(div().text_size(9).text_color(t.muted).child(`${page + 1} / ${pages}`))
+            .child(btn("abs-board-next", "Next ›", page + 1, page < pages - 1))
+        : null;
+
     return this.card(
-      "进行中",
+      "看板",
       null,
-      doing.length
-        ? doing.map((task) => this.taskRow(task))
-        : [div().w_full().py(10).text_size(10).text_color(t.dim).text_center().child("没有进行中的任务")],
+      [
+        // 没有进行中的任务时，这一段整个不画。
+        ...(doing.length
+          ? [this.sectionHead(t, "进行中", doing.length), ...doing.map((task) => this.taskRow(task))]
+          : []),
+        this.sectionHead(t, "已完成", all.length),
+        ...shown.map((task) => this.taskRow(task)),
+        ...(all.length === 0 ? [this.emptyNote(t, "还没有已完成的任务")] : []),
+      ],
+      fill,
+      footer,
     );
+  }
+
+  // 卡片里的空提示：占一段高度，文字水平垂直居中。
+  emptyNote(t, text) {
+    return div().w_full().flex_none().h(64).flex().items_center().justify_center().text_size(10).text_color(t.dim).child(text);
   }
 
   // 最近完成：单独一张卡，与看板并列。
@@ -528,8 +815,8 @@ export default class AbsPanel extends View {
       "图谱索引",
       `${(this.index.sections ?? []).reduce((n, s) => n + (s.items.length || s.stated || 0), 0)} 页`,
       [
-        ...(sections.length ? sections.map((s) => h_flex().w_full().flex_none().gap(6).items_center().px(6).py(5).rounded(7)
-          .bg(t.background).border_1().border_color(t.border).cursor_pointer().hover((el) => el.bg(t.hover))
+        ...(sections.length ? sections.map((s) => h_flex().w_full().flex_none().gap(6).items_center().px(7).py(6).rounded(7)
+          .bg(t.raised).cursor_pointer().hover((el) => el.bg(t.chrome))
           .on_click(() => this.openDetail("section", s))
           .child(div().size(7).flex_none().rounded(4).bg(t.ansi6))
           .child(div().flex_1().min_w(0).truncate().text_size(10.5).font_semibold().text_color(t.foreground).child(s.name))
@@ -553,9 +840,9 @@ export default class AbsPanel extends View {
       "铁律",
       `${rules.length} 条`,
       [
-        ...(shown.length ? shown.map((text, i) => h_flex().w_full().flex_none().gap(4).items_center().px(6).py(5).rounded(7)
-          .bg(t.background).border_1().border_color(t.border)
-          .child(div().text_size(9.5).flex_none().text_color(t.ansi3).child(`${i + 1}`))
+        ...(shown.length ? shown.map((text, i) => h_flex().w_full().flex_none().gap(6).items_center().px(7).py(6).rounded(7)
+          .bg(t.raised).hover((el) => el.bg(t.chrome))
+          .child(div().text_size(9).flex_none().text_color(t.ansi6).child(`${i + 1}`))
           .child(div().flex_1().min_w(0).text_size(10).text_color(t.foreground).child(text))
           .when(editable, (e) => e.child(div().id(`abs-rule-del-${i}`).size(18).flex_none().flex().items_center().justify_center()
             .rounded(5).text_size(10).text_color(t.dim).cursor_pointer()
@@ -569,8 +856,8 @@ export default class AbsPanel extends View {
           .on_click((_e, cx) => { this.rulesOpen = false; cx.notify(); }).child("收起")] : []),
         editable
           ? h_flex().id("abs-rule-add").mt(2).h(26).px(8).flex_none().items_center().justify_center().gap(5).rounded(7)
-            .bg(t.raised).border_1().border_color(t.border).text_size(10).text_color(t.muted).cursor_pointer()
-            .hover((s) => s.bg(t.hover).text_color(t.foreground))
+            .text_size(10).text_color(t.dim).cursor_pointer()
+            .hover((s) => s.bg(t.chrome).text_color(t.foreground))
             .on_click(() => this.addRule()).child("+ 添加铁律")
           : div().px(6).text_size(9.5).text_color(t.dim).child(this.brainOn ? `${this.brainOn} 上的文件改不了，只能看` : "没找到 index.md"),
       ],
@@ -620,36 +907,87 @@ export default class AbsPanel extends View {
     this.editRules((text) => rebuildRules(text, (cur) => (cur.includes(line) ? cur : [...cur, line])));
   }
 
-  logCard() {
+  logCard(fill = 1) {
     const t = theme();
     const all = this.log ?? [];
     const PER = 20;
     const pages = Math.max(1, Math.ceil(all.length / PER));
     const page = Math.min(Math.max(0, this.logPage ?? 0), pages - 1);
     const entries = all.slice(page * PER, page * PER + PER);
+
     const body = entries.length
       ? entries.map((e) => {
+          // 第一行是 `## [时间] [[作者]] 类型 | 正文` 里的正文首句。
           const head = e.text.split("\n")[0] || "(空)";
-          return v_flex().w_full().flex_none().gap(2).px(6).py(5).rounded(7)
-            .bg(t.background).border_1().border_color(t.border).cursor_pointer().hover((el) => el.bg(t.hover))
+          const firstStop = head.search(/[。；]/);
+          const title = firstStop > 0 ? head.slice(0, firstStop + 1) : head;
+          const detail = firstStop > 0 ? head.slice(firstStop + 1).trim() : "";
+          return v_flex()
+            .w_full()
+            .flex_none()
+            .gap(3)
+            .px(7)
+            .py(6)
+            .rounded(7)
+            .bg(t.raised)
+            .cursor_pointer()
+            .hover((el) => el.bg(t.chrome))
             .on_click(() => this.openDetail("entry", e))
-            .child(h_flex().gap(6).items_center()
-              .child(div().size(7).flex_none().rounded(4).bg(e.kind === "dev" ? t.ansi2 : t.ansi6))
-              .child(div().flex_1().min_w(0).truncate().text_size(10).font_semibold().text_color(t.foreground).child(head))
-              .child(div().text_size(9.5).flex_none().text_color(t.dim).child(e.when)))
-            .when(Boolean(e.kind), (el) => el.child(div().px(1).text_size(9).text_color(t.muted).child(e.kind)));
+            // 第一行：标题
+            .child(div().w_full().min_w(0).truncate().text_size(11).font_semibold().text_color(t.foreground).child(title))
+            // 第二行：详情
+            .when(Boolean(detail), (el) =>
+              el.child(div().w_full().min_w(0).truncate().text_size(9).text_color(t.dim).child(detail)),
+            )
+            // 第三行：作者在左，时间在右
+            .child(
+              h_flex()
+                .gap(6)
+                .items_center()
+                .child(div().text_size(9).text_color(t.dim).child(e.who || ""))
+                .child(div().flex_1())
+                .child(div().text_size(9).text_color(t.dim).child(e.when)),
+            );
         })
       : [div().w_full().py(10).text_size(10).text_color(t.dim).text_center().child("还没有日志")];
-    if (pages > 1) {
-      const btn = (id, label, to, on) => h_flex().id(id).h(18).px(6).flex_none().items_center().rounded(5)
-        .bg(t.chrome).text_color(on ? t.foreground : t.dim).when(on, (x) => x.cursor_pointer().hover((y) => y.bg(t.hover)))
-        .on_click((_e, cx) => { if (!on) return; this.logPage = to; cx.notify(); }).child(div().text_size(9.5).child(label));
-      body.push(h_flex().w_full().flex_none().mt(2).gap(6).items_center().justify_center()
-        .child(btn("abs-log-prev", "‹ 上一页", page - 1, page > 0))
-        .child(div().text_size(9).text_color(t.muted).child(`${page + 1} / ${pages}`))
-        .child(btn("abs-log-next", "下一页 ›", page + 1, page < pages - 1)));
-    }
-    return this.card("日志", all.length, body);
+
+    const btn = (id, label, to, on) =>
+      h_flex()
+        .id(id)
+        .h(20)
+        .px(8)
+        .flex_none()
+        .items_center()
+        .rounded(6)
+        .bg(t.chrome)
+        .text_color(on ? t.foreground : t.dim)
+        .when(on, (x) => x.cursor_pointer().hover((y) => y.bg(t.hover)))
+        .on_click((_e, cx) => {
+          if (!on) return;
+          this.logPage = to;
+          cx.notify();
+        })
+        .child(div().text_size(9.5).child(label));
+
+    // 翻页条固定在卡片底部，不跟着列表滚。
+    const footer =
+      pages > 1
+        ? h_flex()
+            .w_full()
+            .flex_none()
+            .h(32)
+            .px(8)
+            .gap(8)
+            .items_center()
+            .justify_center()
+            .border_t(1)
+            .border_color(t.border)
+            .child(btn("abs-log-prev", "‹ Prev", page - 1, page > 0))
+            .child(div().text_size(9).text_color(t.muted).child(`${page + 1} / ${pages}`))
+            .child(btn("abs-log-next", "Next ›", page + 1, page < pages - 1))
+        : null;
+
+    return this.card("日志", all.length, body, fill, footer);
   }
 
   openIn(editor) {
@@ -714,12 +1052,54 @@ export default class AbsPanel extends View {
   sessCards() {
     const t = theme();
     const list = this.sessVisible();
-    // 和看板/图谱/日志用同一个底色，四页统一。
     const bg = t.background;
-    const body = list.length
-      ? list.map((x) => this.sessRow(x, bg))
+
+    // 分页：翻页条钉在卡片底部，样式和看板一致。
+    const PER = 20;
+    const pages = Math.max(1, Math.ceil(list.length / PER));
+    const page = Math.min(Math.max(0, this.sessPage ?? 0), pages - 1);
+    const shown = list.slice(page * PER, page * PER + PER);
+
+    const body = shown.length
+      ? shown.map((x) => this.sessRow(x, bg))
       : [div().px(6).py(8).text_size(10).text_color(t.dim).child("这个文件夹没有会话")];
-    return [this.card(this.machine ? `pi 会话 · ${this.machine}` : "pi 会话", list.length, body)];
+
+    const btn = (id, label, to, on) =>
+      h_flex()
+        .id(id)
+        .h(20)
+        .px(8)
+        .flex_none()
+        .items_center()
+        .rounded(6)
+        .bg(t.chrome)
+        .text_color(on ? t.foreground : t.dim)
+        .when(on, (x) => x.cursor_pointer().hover((y) => y.bg(t.hover)))
+        .on_click((_e, cx) => {
+          if (!on) return;
+          this.sessPage = to;
+          cx.notify();
+        })
+        .child(div().text_size(9.5).child(label));
+
+    const footer =
+      pages > 1
+        ? h_flex()
+            .w_full()
+            .flex_none()
+            .h(32)
+            .px(8)
+            .gap(8)
+            .items_center()
+            .justify_center()
+            .border_t(1)
+            .border_color(t.border)
+            .child(btn("abs-sess-prev", "‹ Prev", page - 1, page > 0))
+            .child(div().text_size(9).text_color(t.muted).child(`${page + 1} / ${pages}`))
+            .child(btn("abs-sess-next", "Next ›", page + 1, page < pages - 1))
+        : null;
+
+    return [this.card(this.machine ? `pi 会话 · ${this.machine}` : "pi 会话", list.length, body, 1, footer)];
   }
 
   sessTargets() {
@@ -842,22 +1222,56 @@ export default class AbsPanel extends View {
     const t = theme();
     const arming = this.confirmDelete === s.id;
     const title = s.preview || s.id;
-    return v_flex().id(`sess-${s.id}`).w_full().flex_none().gap(2).px(6).py(5).rounded(7)
-      .bg(bg).border_1().border_color(arming ? t.ansi1 : t.border).cursor_pointer()
-      .hover((el) => el.bg(t.hover))
+    return v_flex()
+      .id(`sess-${s.id}`)
+      .relative()
+      .w_full()
+      .flex_none()
+      .gap(3)
+      .pl(8)
+      .pr(28)
+      .py(7)
+      .rounded(7)
+      .bg(arming ? t.ansi1 : t.raised)
+      .cursor_pointer()
+      .hover((el) => el.bg(arming ? t.ansi1 : t.chrome))
+      .on_hover((h, cx) => {
+        const had = this.hoveredSess === s.id;
+        if (h) this.hoveredSess = s.id;
+        else if (had) this.hoveredSess = null;
+        if (had !== h) cx.notify();
+      })
       .on_click((_e, cx) => this.sessResume(s, cx))
-      .child(h_flex().gap(6).items_center()
-        .child(div().flex_1().min_w(0).truncate().text_size(11).font_semibold().text_color(t.foreground).child(title))
-        .child(div().text_size(9.5).flex_none().text_color(t.dim).child(ago(s.mtime)))
-        // 删除按钮：点自己不冒泡到整行的「恢复」
-        .child(h_flex().id(`del-${s.id}`).h(16).px(4).flex_none().items_center().rounded(4)
-          .bg(arming ? t.ansi1 : t.chrome).cursor_pointer()
-          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-          .on_click((_e, cx) => { cx.stop_propagation(); this.sessRemove(s, cx); })
-          .child(div().text_size(9).text_color(arming ? t.background : t.dim).child(arming ? "删?" : "×"))))
-      .child(h_flex().gap(6).items_center()
-        .child(div().flex_1().min_w(0).truncate().text_size(10).text_color(t.muted).child(s.id))
-        .child(div().text_size(9.5).flex_none().text_color(t.dim).child(sizeText(s.size))));
+      .child(div().w_full().min_w(0).truncate().text_size(11).font_semibold().text_color(arming ? t.background : t.foreground).child(title))
+      .child(
+        h_flex()
+          .gap(6)
+          .items_center()
+          .child(div().text_size(9).text_color(t.dim).child(ago(s.mtime)))
+          .child(div().text_size(9).text_color(t.dim).child(sizeText(s.size))),
+      )
+      // 删除按钮：平时藏着，鼠标落在这一行时在右侧垂直居中冒出来。无背景、不变色。
+      .child(
+        div()
+          .absolute()
+          .right(8)
+          .top(0)
+          .bottom(0)
+          .flex()
+          .items_center()
+          .child(
+            div()
+              .id(`del-${s.id}`)
+              .opacity(arming || this.hoveredSess === s.id ? 1 : 0)
+              .cursor_pointer()
+              .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+              .on_click((_e, cx) => {
+                cx.stop_propagation();
+                this.sessRemove(s, cx);
+              })
+              .child(div().text_size(11).text_color(arming ? t.background : t.dim).child(arming ? "删?" : "×")),
+          ),
+      );
   }
 
   render(cx) {
@@ -866,36 +1280,23 @@ export default class AbsPanel extends View {
     // 改完 index.md 后要刷新，异步回调里拿不到 cx，存一份。
     this.lastCx = cx;
     const t = theme();
-    const tab = (id, label) => h_flex().id(`abs-${id}`).h(24).px(9).flex_none().items_center().rounded(6).text_size(10)
-      .bg(this.view === id ? t.selected : t.chrome).text_color(this.view === id ? t.foreground : t.muted)
-      .hover((s) => s.bg(t.hover)).on_click((_e, cx) => { this.view = id; cx.notify(); }).child(label);
     // 图谱页把铁律放最上面，下面才是分类索引。
-    const body = this.view === "sessions" ? this.sessCards()
-      : this.view === "board" ? [this.boardCard(), this.logCard()]
-      : this.view === "index" ? [this.rulesCard(), this.indexCard()]
-      : [this.logCard()];
-    return v_flex().id("abs-panel").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground)
-      .child(h_flex().h(38).flex_none().px(12).gap(6).items_center().bg(t.chrome).border_b(1).border_color(t.border)
-        .child(tab("sessions", "会话")).child(tab("board", "看板")).child(tab("index", "图谱")).child(tab("log", "日志"))
-        .child(div().flex_1())
-        .child(div().id("abs-refresh").size(22).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim)
-          .hover((s) => s.bg(t.hover).text_color(t.foreground))
-          .on_click((_e, cx) => {
-            // 会话页刷会话，其他页刷 .brain；两个都刷也不会多花多少。
-            this.refresh(cx);
-            this.sessRefresh(cx);
-          }).child(div().text_size(12).child("↻"))))
-      .child(div().flex_1().min_h(0).overflow_y_scrollbar().p(10).child(v_flex().gap(10).w_full()
+    const view = shared("abs.view") ?? this.view;
+    // 只为当前这一页起刷新表。
+    this.syncTimers(cx);
+    // 会话页和看板页的卡片自己滚，外层不再滚。
+    const fillsPanel = view === "sessions" || view === "board" || view === "log";
+    const body = view === "sessions" ? this.sessCards()
+      // 看板：进行中、已完成、日志三张卡片，各自占一份高度、各自在里面滚。
+      // 看板：任务卡片按内容高，剩下的高度全给日志。
+      // 看板：一张卡片，里面分「进行中」和「已完成」，整张卡片一起滚。
+      : view === "board" ? [this.boardCard(1)]
+      : view === "index" ? [this.rulesCard(), this.indexCard()]
+      : [this.logCard(1)];
+    return v_flex().id("abs-panel").size_full().min_h(0).text_color(t.foreground).bg(t.background)
+      .child(div().flex_1().min_h(0).px(10).pb(10).pt(0).when(fillsPanel, (e) => e.flex(), (e) => e.overflow_y_scrollbar()).child(v_flex().gap(10).w_full().when(fillsPanel, (x) => x.flex_1().min_h(0))
         .when(this.note != null, (e) => e.child(div().px(9).py(7).rounded(8).bg(t.raised).border_1().border_color(t.border).text_size(10).text_color(t.ansi3).child(this.note)))
         .when(this.error != null, (e) => e.child(div().px(9).py(7).rounded(8).bg(t.raised).border_1().border_color(t.ansi1).text_size(10).text_color(t.ansi1).child(this.error)))
-        .children(body)))
-      .child(h_flex().h(26).flex_none().px(10).gap(6).items_center().border_t(1).border_color(t.border).text_size(9.5).text_color(t.dim)
-        .child(div().flex_1().min_w(0).truncate().child((this.brainOn ? `${this.brainOn}:` : "") + (this.brainDir ?? (this.loading ? "读取中…" : "无 .brain"))))
-        .child(h_flex().id("abs-open-zed").size(22).flex_none().items_center().justify_center()
-          .cursor_pointer().hover((s) => s.opacity(0.75))
-          .on_click(() => this.openIn("zed")).child(image("abs-icons/zed.svg").size(14)))
-        .child(h_flex().id("abs-open-code").size(22).flex_none().items_center().justify_center()
-          .cursor_pointer().hover((s) => s.opacity(0.75))
-          .on_click(() => this.openIn("code")).child(image("abs-icons/vscode.svg").size(14))));
+        .children(body)));
   }
 }
