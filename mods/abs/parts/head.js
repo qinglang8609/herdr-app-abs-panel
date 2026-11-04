@@ -53,31 +53,29 @@ function where() {
 // 在 Header.init 的 cx.spawn 里预先查好，点击时同步读，不在回调里等 Promise。
 const HOSTS = new Map();
 
+// 空间的 machine 是显示名，可能被改过（MACOS 改成 macos），ssh 对大小写敏感。
+// ssh 认的是 ~/.ssh/config 里 Host 行的原名，所以读它建大小写无关的索引。
+// 只读文件，不碰 hc —— hc 的 Promise 在某些调用路径里不回来，会挡住后面的代码。
 async function loadHosts() {
-  const add = (name, host) => {
-    if (name && host) HOSTS.set(String(name).toLowerCase(), host);
-  };
-  // hc 里登记的机器及其 target
-  try {
-    const r = await hc(["machine", "ls"]);
-    for (const m of JSON.parse(r.stdout).machines) add(m.name, m.target || m.name);
-  } catch { /* 没有就跳过 */ }
-  // ~/.ssh/config 的 Host 别名：ssh 对大小写敏感，这里按小写建索引
   try {
     const text = await readTextFile(`${home()}/.ssh/config`);
     for (const line of String(text ?? "").split("\n")) {
       const m = /^\s*Host\s+(.+)$/i.exec(line);
       if (!m) continue;
       for (const alias of m[1].trim().split(/\s+/)) {
-        if (alias && !alias.includes("*") && !alias.includes("?")) add(alias, alias);
+        if (alias && !alias.includes("*") && !alias.includes("?")) {
+          HOSTS.set(alias.toLowerCase(), alias);
+        }
       }
     }
-  } catch { /* 读不到就跳过 */ }
+  } catch { /* 读不到就用原名 */ }
 }
 
 async function openIn(choice) {
   const { dir, on } = where();
   if (!dir) return;
+  // 索引没建好就先建（只读 ~/.ssh/config，很快，不碰 hc）。
+  if (!HOSTS.size) await loadHosts();
   const e = editors(win()?.platform, dir).find((x) => x[0] === choice) ?? editors(win()?.platform, dir)[0];
   setShared("studio.editor", e[0]);
   const bin = choice === "zed"
