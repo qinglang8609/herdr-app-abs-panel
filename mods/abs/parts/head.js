@@ -10,7 +10,7 @@
 
 import { div, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { run, theme, shared, setShared, openOverlay, closeOverlay, exec, notify, nextCommand, props, hc, window as win } from "herdr";
+import { run, theme, shared, setShared, openOverlay, closeOverlay, exec, notify, nextCommand, props, home, readTextFile, window as win } from "herdr";
 import { icon, own, activeSpace, activeTab, lead, machineOf, isShown, toggleReview, toggleTerminal, terminalDrawer, diffStat } from "./lib.js";
 import { threadTitle, projectName } from "./side.js";
 
@@ -45,6 +45,22 @@ function where() {
   return { tab, space, p, dir: p?.cwd || space?.folder || null, on: machineOf(p?.terminal) ?? space?.machine ?? null };
 }
 
+// 空间名到 ssh 主机的映射。用户重命名机器时只改 name，ssh 用的地址在 target 里，
+// 所以不能拿空间名当主机名。读 hc 的 machines.json，不跑 hc（在 mod 里跑它会挂住）。
+async function sshHost(name) {
+  try {
+    const path = `${home()}/.local/state/herdr-core/default/machines.json`;
+    const text = await readTextFile(path);
+    if (text) {
+      const want = String(name).toLowerCase();
+      for (const m of JSON.parse(text)) {
+        if (String(m.name).toLowerCase() === want) return m.target || m.host || m.name;
+      }
+    }
+  } catch { /* 读不到就退回原名 */ }
+  return name;
+}
+
 async function openIn(choice) {
   const { dir, on } = where();
   if (!dir) return;
@@ -55,16 +71,14 @@ async function openIn(choice) {
     if (r.code !== 0) notify({ title: `Couldn't open ${e[1]}`, body: (r.stderr || "").trim().split("\n")[0] || "Is it installed?", level: "error" });
     return;
   }
-  // 远程：本机编辑器 CLI 连过去。空间名当 ssh 主机名，大小写都试（fnos 的别名是 FNOS）。
+  // 远程：本机编辑器 CLI 连过去，主机名用 hc 的 target，不是空间的显示名。
   const bin = choice === "zed"
     ? "/Applications/Zed.app/Contents/MacOS/cli"
     : "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code";
-  for (const host of [on, String(on).toUpperCase()]) {
-    const args = choice === "zed" ? [`ssh://${host}${dir}`] : ["--remote", `ssh-remote+${host}`, dir];
-    const r = await exec(bin, args).catch((err) => ({ code: 1, stderr: String(err) }));
-    if (r.code === 0) return;
-  }
-  notify({ title: `Couldn't open ${e[1]} on ${on}`, body: `No ssh host matched ${on}.`, level: "error" });
+  const host = await sshHost(on);
+  const args = choice === "zed" ? [`ssh://${host}${dir}`] : ["--remote", `ssh-remote+${host}`, dir];
+  const r = await exec(bin, args).catch((err) => ({ code: 1, stderr: String(err) }));
+  if (r.code !== 0) notify({ title: `Couldn't open ${e[1]} on ${on}`, body: (r.stderr || "").trim().split("\n")[0] || `ssh ${host} failed.`, level: "error" });
 }
 
 function button(t, id, children, onClick, { tip, framed = true, on = false, hoverBg = true } = {}) {
