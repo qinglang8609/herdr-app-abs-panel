@@ -53,30 +53,31 @@ async function openIn(choice) {
   const bin = choice === "zed"
     ? "/Applications/Zed.app/Contents/MacOS/cli"
     : "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code";
+  const open = (host) => {
+    const args = choice === "zed" ? [`ssh://${host}${dir}`] : ["--remote", `ssh-remote+${host}`, dir];
+    exec(bin, args).catch(() => null);
+  };
+  const fail = (err) => notify({
+    title: `Couldn't open ${e[1]}${on ? ` on ${on}` : ""}`,
+    body: String(err && (err.stderr || err.message || err)).split("\n")[0] || "Is it installed?",
+    level: "error",
+  });
   if (!on) {
-    exec(bin, [dir]).catch((err) => notify({ title: `Couldn't open ${e[1]}`, body: String(err).split("\n")[0], level: "error" }));
+    exec(bin, [dir]).catch(fail);
     return;
   }
-  // 主机名候选：机器名、大写形式，再到 hc 里查这台机器的 target。
-  const hosts = [on, String(on).toUpperCase()];
-  const open = (host) => choice === "zed"
-    ? [`ssh://${host}${dir}`]
-    : ["--remote", `ssh-remote+${host}`, dir];
-  for (const host of hosts) {
-    exec(bin, open(host)).catch(() => null);
-  }
+  // 只开一次。target 是真 ssh 地址，查得到就用它；查不到才用机器名。
+  // 不用 await：在 mod 里 await 会把整条链挂住。
   hc(["machine", "ls"]).then((r) => {
-    const want = String(on).toLowerCase();
-    for (const m of JSON.parse(r.stdout).machines) {
-      if (String(m.name).toLowerCase() === want) {
-        const t = m.target || m.name;
-        if (!hosts.some((h) => h.toLowerCase() === String(t).toLowerCase())) {
-          exec(bin, open(t)).catch(() => null);
-        }
-        break;
+    let host = on;
+    try {
+      const want = String(on).toLowerCase();
+      for (const m of JSON.parse(r.stdout).machines) {
+        if (String(m.name).toLowerCase() === want) { host = m.target || m.name; break; }
       }
-    }
-  }).catch(() => null);
+    } catch { /* 查不到就用原名 */ }
+    open(host);
+  }).catch(() => open(on));
 }
 
 function button(t, id, children, onClick, { tip, framed = true, on = false, hoverBg = true } = {}) {
