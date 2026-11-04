@@ -369,17 +369,17 @@ export default class Spaces extends View {
 
   // 一个工作区里正在跑的 agent：一个 app 一个圆圈，圆里放它的图标。
   agentDots(t, list) {
-    // 叠着排，圆心距 6px。绝对定位摆位，左起第 i 个放在 i*6。
-    // 先写的画在上层，所以正序写 —— 左边的压住右边。
+    // 叠着排，圆心距 10px（18 的圆叠 8px，看得出是两个又不散开）。
+    // 绝对定位摆位，先写的画在上层 —— 左边的压住右边。
     const n = Math.min(list.length, 4);
-    const wpx = 18 + (n - 1) * 6;
+    const wpx = 18 + (n - 1) * 10;
     const items = list.slice(0, 4);
     return div().relative().flex_none().flex_shrink(0).h(18).w(wpx)
       .children(items.map((a, i) => {
         const prog = a.program;
         const name = a.app || "agent";
         return div()
-          .absolute().top(0).left(i * 6)
+          .absolute().top(0).left(i * 10)
           .size(18).flex_none().rounded(9).flex().items_center().justify_center()
           .bg(prog?.tile ?? t.raised).border_1().border_color(t.border).tooltip(name)
           .child(prog?.icon
