@@ -10,7 +10,7 @@
 
 import { div, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { run, theme, shared, setShared, openOverlay, closeOverlay, exec, notify, nextCommand, props, window as win } from "herdr";
+import { run, theme, shared, setShared, openOverlay, closeOverlay, exec, notify, nextCommand, props, hc, window as win } from "herdr";
 import { icon, own, activeSpace, activeTab, lead, machineOf, isShown, toggleReview, toggleTerminal, terminalDrawer, diffStat } from "./lib.js";
 import { threadTitle, projectName } from "./side.js";
 
@@ -48,14 +48,23 @@ function where() {
 async function openIn(choice) {
   const { dir, on } = where();
   if (!dir) return;
-  if (on) {
-    notify({ title: "Open works for folders on this computer", body: `This thread runs on ${on}.`, level: "info" });
-    return;
-  }
   const e = editors(win()?.platform, dir).find((x) => x[0] === choice) ?? editors(win()?.platform, dir)[0];
   setShared("studio.editor", e[0]);
-  const r = await exec(e[2], e[3]).catch((err) => ({ code: 1, stderr: String(err) }));
-  if (r.code !== 0) notify({ title: `Couldn't open ${e[1]}`, body: (r.stderr || "").trim().split("\n")[0] || "Is it installed?", level: "error" });
+  if (!on) {
+    const r = await exec(e[2], e[3]).catch((err) => ({ code: 1, stderr: String(err) }));
+    if (r.code !== 0) notify({ title: `Couldn't open ${e[1]}`, body: (r.stderr || "").trim().split("\n")[0] || "Is it installed?", level: "error" });
+    return;
+  }
+  // 远程：本机编辑器 CLI 连过去。空间名当 ssh 主机名，大小写都试（fnos 的别名是 FNOS）。
+  const bin = choice === "zed"
+    ? "/Applications/Zed.app/Contents/MacOS/cli"
+    : "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code";
+  for (const host of [on, String(on).toUpperCase()]) {
+    const args = choice === "zed" ? [`ssh://${host}${dir}`] : ["--remote", `ssh-remote+${host}`, dir];
+    const r = await exec(bin, args).catch((err) => ({ code: 1, stderr: String(err) }));
+    if (r.code === 0) return;
+  }
+  notify({ title: `Couldn't open ${e[1]} on ${on}`, body: `No ssh host matched ${on}.`, level: "error" });
 }
 
 function button(t, id, children, onClick, { tip, framed = true, on = false, hoverBg = true } = {}) {
@@ -244,8 +253,8 @@ export class QuickOpen {
     const items = [
       ["vscode", "VS Code", "code-xml", () => openIn("vscode")],
       ["zed", "Zed", "square-pen", () => openIn("zed")],
+      ["ttt", "TTT", "square-terminal", () => run("terminal.open", { argv: ["ttt"], folder: dir ?? undefined, place: "right" })],
       ["files", "文件窗口", "folder-open", () => dir && exec("open", [dir])],
-      ["terminal", "新终端", "square-terminal", () => run("terminal.open", { folder: dir ?? undefined, place: "right" })],
     ];
     return v_flex()
       .id("sq-menu")

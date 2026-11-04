@@ -1294,7 +1294,7 @@ export default class AbsPanel extends View {
       : view === "index" ? [this.rulesCard(), this.indexCard()]
       : [this.logCard(1)];
     return v_flex().id("abs-panel").size_full().min_h(0).text_color(t.foreground).bg(t.background)
-      .child(div().flex_1().min_h(0).pl(0).pr(10).pb(0).pt(0).when(fillsPanel, (e) => e.flex(), (e) => e.overflow_y_scrollbar()).child(v_flex().gap(10).w_full().when(fillsPanel, (x) => x.flex_1().min_h(0))
+      .child(div().flex_1().min_h(0).p(0).when(fillsPanel, (e) => e.flex(), (e) => e.overflow_y_scrollbar()).child(v_flex().gap(10).w_full().when(fillsPanel, (x) => x.flex_1().min_h(0))
         .when(this.note != null, (e) => e.child(div().px(9).py(7).rounded(8).bg(t.raised).border_1().border_color(t.border).text_size(10).text_color(t.ansi3).child(this.note)))
         .when(this.error != null, (e) => e.child(div().px(9).py(7).rounded(8).bg(t.raised).border_1().border_color(t.ansi1).text_size(10).text_color(t.ansi1).child(this.error)))
         .children(body)));
