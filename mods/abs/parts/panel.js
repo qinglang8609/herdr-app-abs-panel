@@ -718,21 +718,7 @@ export default class AbsPanel extends View {
 
   // 看板：只放进行中的任务。徽章和空提示都去掉。
   // 一段小标题：左边名字，右边条数。
-  sectionHead(t, label, count) {
-    return h_flex()
-      .w_full()
-      .flex_none()
-      .px(7)
-      .pt(8)
-      .pb(3)
-      .gap(6)
-      .items_center()
-      .child(div().text_size(10.5).font_semibold().text_color(t.muted).child(label))
-      .child(div().text_size(9).text_color(t.dim).child(String(count)))
-      .child(div().flex_1());
-  }
-
-  // 看板：一张卡片，先「进行中」再「已完成」，整张卡片一起滚。
+  // 看板：一张卡片，进行中和已完成直接排在一起，整张卡片一起滚。
   boardCard(fill = 1) {
     const t = theme();
     const doing = this.todo.doing ?? [];
