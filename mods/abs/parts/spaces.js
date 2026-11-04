@@ -354,8 +354,7 @@ export default class Spaces extends View {
     const raw = g.branch ?? "detached";
     const same = (a) => a.toLowerCase() === name.toLowerCase();
     const branch = same(raw) || raw === "master" || raw === "main" ? "" : raw;
-    const repo = tree || same(g.name) ? "" : g.name;
-    const where = [repo, branch].filter(Boolean).join(" \u00b7 ");
+    const where = branch;
     return h_flex()
       .flex_1()
       .min_w(0)
@@ -371,11 +370,15 @@ export default class Spaces extends View {
 
   // 一个工作区里正在跑的 agent：一个 app 一个圆圈，圆里放它的图标。
   agentDots(t, list) {
-    return h_flex().flex_none().gap(3).items_center()
-      .children(list.slice(0, 4).map((a) => {
+    // 叠着排：第二个起向左压 7px，让相邻的圆半重叠。
+    // 容器锁死：名字再长也只能截自己的字，不能把图标挤出去。
+    const n = Math.min(list.length, 4);
+    return h_flex().flex_none().flex_shrink(0).items_center().w(n * 11 + 7)
+      .children(list.slice(0, 4).map((a, i) => {
         const prog = a.program;
         const name = a.app || "agent";
         return div().size(18).flex_none().rounded(9).flex().items_center().justify_center()
+          .when(i > 0, (el) => el.ml(-7))
           .bg(prog?.tile ?? t.raised).border_1().border_color(t.border).tooltip(name)
           .child(prog?.icon
             ? (prog.tint ? svg(prog.icon).size(12).flex_none().text_color(prog.color ?? t.foreground)
@@ -436,9 +439,9 @@ export default class Spaces extends View {
           .items_center()
           .when(Boolean(tree), el => el.pl(22).child(svg("mods/abs/icons/branch.svg").size(13).text_color(t.dim)))
           .when(!tree, el => el.child(svg(`mods/abs/icons/${spaceIcon(w.id)}.svg`).size(14).flex_none().text_color(t.muted)))
-          .child(div().flex_shrink(0).max_w(150).truncate().text_size(12.5).text_color(t.foreground).child(w.name))
+          .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(t.foreground).child(w.name))
           .when(appsOf(w, am).length > 0, (el) => el.child(this.agentDots(t, appsOf(w, am))))
-          .child(g ? this.gitTail(g, tree, w.name, t) : div().flex_1()),
+          .when(Boolean(g), (el) => el.child(h_flex().flex_none().items_center().child(this.gitTail(g, tree, w.name, t)))),
       );
   }
 

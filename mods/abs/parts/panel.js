@@ -629,9 +629,9 @@ export default class AbsPanel extends View {
   // 一条任务：名字最大，下面是说明；左上角圆点看状态，子项缩进列在下面。
   // 三行：标题 / 描述 / 时间与子项数。子项缩进列在下面。
   // 只有三行：标题 / 描述 / 时间 + 右侧状态与子项数。子项明细点开弹窗看。
-  taskRow(task) {
+  taskRow(task, done = false) {
     const t = theme();
-    const dot = this.stateColor(task);
+    const dot = done ? t.dim : this.stateColor(task);
     // 描述里去掉【结论】和 (完成 ...) 尾巴，那些已经有自己的位置或不要了。
     const cleanNote = (task.note ?? "")
       .replace(/【[^】]*】/g, "")
@@ -787,12 +787,8 @@ export default class AbsPanel extends View {
       "看板",
       null,
       [
-        // 没有进行中的任务时，这一段整个不画。
-        ...(doing.length
-          ? [this.sectionHead(t, "进行中", doing.length), ...doing.map((task) => this.taskRow(task))]
-          : []),
-        this.sectionHead(t, "已完成", all.length),
-        ...shown.map((task) => this.taskRow(task)),
+        ...doing.map((task) => this.taskRow(task)),
+        ...shown.map((task) => this.taskRow(task, true)),
         ...(all.length === 0 ? [this.emptyNote(t, "还没有已完成的任务")] : []),
       ],
       fill,
