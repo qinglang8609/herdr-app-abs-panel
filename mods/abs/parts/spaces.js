@@ -3,10 +3,23 @@
 // its first terminal is in now, only where unusual: branch, ahead/behind. Agent state lives in the agents list, not here. Click to
 // switch, right-click for its menu, drag to reorder.
 
-import { View, div, svg } from "gpui-kit";
+import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, machines, panes, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, layout } from "herdr";
+import { spaces, agents, machines, panes, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, layout } from "herdr";
 import { SPACE_ICONS } from "./space-icons.js";
+
+// 每个空间正在跑的 agent。一次遍历分组，行渲染时按 id 取。
+function agentMap() {
+  const m = new Map();
+  for (const a of agents() || []) {
+    if (!a.app) continue;
+    const list = m.get(a.space) ?? [];
+    list.push(a);
+    m.set(a.space, list);
+  }
+  return m;
+}
+const appsOf = (w, map) => (map ?? agentMap()).get(w.id) ?? [];
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -356,7 +369,24 @@ export default class Spaces extends View {
       .when(g.behind > 0, (el) => el.child(div().flex_none().text_color(t.ansi1).child(`\u2193${g.behind}`)));
   }
 
+  // 一个工作区里正在跑的 agent：一个 app 一个圆圈，圆里放它的图标。
+  agentDots(t, list) {
+    return h_flex().flex_none().gap(3).items_center()
+      .children(list.slice(0, 4).map((a) => {
+        const prog = a.program;
+        const name = a.app || "agent";
+        return div().size(18).flex_none().rounded(9).flex().items_center().justify_center()
+          .bg(prog?.tile ?? t.raised).border_1().border_color(t.border).tooltip(name)
+          .child(prog?.icon
+            ? (prog.tint ? svg(prog.icon).size(12).flex_none().text_color(prog.color ?? t.foreground)
+                         : image(prog.icon).w(12).h(12).flex_none())
+            : div().text_size(9).text_color(t.foreground).child(name.slice(0, 1)));
+      }))
+      .when(list.length > 4, (el) => el.child(div().text_size(10).text_color(t.dim).child(`+${list.length - 4}`)));
+  }
+
   row({ w, i, g, tree }, t) {
+    const am = agentMap();
     const on = w.active;
     const colors = shared("space.colors") ?? {};
     const color = colors[w.id] ?? "ansi6";
@@ -407,6 +437,7 @@ export default class Spaces extends View {
           .when(Boolean(tree), el => el.pl(22).child(svg("mods/abs/icons/branch.svg").size(13).text_color(t.dim)))
           .when(!tree, el => el.child(svg(`mods/abs/icons/${spaceIcon(w.id)}.svg`).size(14).flex_none().text_color(t.muted)))
           .child(div().flex_shrink(0).max_w(150).truncate().text_size(12.5).text_color(t.foreground).child(w.name))
+          .when(appsOf(w, am).length > 0, (el) => el.child(this.agentDots(t, appsOf(w, am))))
           .child(g ? this.gitTail(g, tree, w.name, t) : div().flex_1()),
       );
   }
