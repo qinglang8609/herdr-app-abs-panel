@@ -4,3 +4,8 @@ herdr.d.ts
 jsconfig.json
 
 .DS_Store
+
+# 编辑器类型文件，每台机器 herdr-app 自己生成
+*.d.ts
+jsconfig.json
+*.bak*

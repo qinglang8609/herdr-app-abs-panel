@@ -3,8 +3,8 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/qinglang8609/herdr-app-abs-panel/main/get.sh | sh
 #
-# 做四件事：下载到 ~/.local/share/abs-panel、软链进 herdr-app 的 mods、放图标、切布局。
-# 重复运行等于升级，已装过直接再跑一次即可。
+# 做四件事：下载到 ~/.local/share/abs-panel、软链进 herdr-app 的 mods、
+# 装模块/主题/布局、切布局。重复运行等于升级，已装过直接再跑一次即可。
 set -eu
 
 OWNER_REPO="qinglang8609/herdr-app-abs-panel"
@@ -42,7 +42,7 @@ tar -xzf "$TMP/src.tar.gz" -C "$TMP" || die "解压失败"
 # GitHub 的 tarball 会带一层 <repo>-<branch> 目录，取它。
 src=$(find "$TMP" -maxdepth 1 -type d -name '*-*' | head -1)
 [ -n "$src" ] || die "解压后找不到源码目录"
-[ -f "$src/panel/main.js" ] || die "源码不完整，缺 panel/main.js"
+[ -f "$src/mods/abs/main.js" ] || die "源码不完整，缺 mods/abs/main.js"
 
 # ── 落盘 ─────────────────────────────────
 mkdir -p "$DEST"
@@ -50,10 +50,14 @@ mkdir -p "$DEST"
 stage="$DEST/.staging"
 rm -rf "$stage"
 mkdir -p "$stage"
-cp -R "$src/panel" "$src/tabs-abs" "$src/detail" "$src/assets" "$stage/" || die "拷贝失败，旧版未动"
-[ -f "$stage/panel/main.js" ] || die "拷贝不完整，旧版未动"
+ITEMS="mods detail themes layouts"
+for item in $ITEMS; do
+  [ -d "$src/$item" ] && cp -R "$src/$item" "$stage/" || true
+done
+[ -f "$stage/mods/abs/main.js" ] || die "拷贝不完整，旧版未动"
 # 逐个换：只删一层内容不删目录，正在跑的 mod 软链指向这里。
-for item in panel tabs-abs detail assets; do
+for item in $ITEMS; do
+  [ -d "$stage/$item" ] || continue
   rm -rf "$DEST/$item"
   mv "$stage/$item" "$DEST/$item" || die "替换 $item 失败"
 done

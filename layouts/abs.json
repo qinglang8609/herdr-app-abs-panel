@@ -1,0 +1,177 @@
+{
+  "id": "root",
+  "type": "row",
+  "children": [
+    {
+      "id": "sidebar",
+      "type": "column",
+      "children": [
+        {
+          "id": "side-top",
+          "type": "block",
+          "content": {
+            "mod": "abs",
+            "props": {
+              "part": "side-top"
+            }
+          },
+          "size": {
+            "px": 52
+          },
+          "window_drag": true
+        },
+        {
+          "id": "spaces-bar",
+          "type": "block",
+          "content": {
+            "mod": "abs",
+            "props": {
+              "part": "spaces-bar"
+            }
+          },
+          "size": {
+            "px": 98
+          }
+        },
+        {
+          "id": "sidebar-lists",
+          "type": "column",
+          "children": [
+            {
+              "id": "spaces",
+              "type": "block",
+              "content": {
+                "mod": "abs",
+                "props": {
+                  "part": "spaces"
+                }
+              },
+              "size": {
+                "weight": 1
+              },
+              "min": 81
+            },
+            {
+              "id": "agents",
+              "type": "block",
+              "content": {
+                "mod": "abs",
+                "props": {
+                  "part": "agents"
+                }
+              },
+              "size": {
+                "weight": 1
+              },
+              "min": 81
+            }
+          ]
+        }
+      ],
+      "size": {
+        "px": 268
+      },
+      "min": 39.599998474121094,
+      "max": 432,
+      "background": "chrome",
+      "resizable": false
+    },
+    {
+      "id": "work",
+      "type": "column",
+      "children": [
+        {
+          "id": "head",
+          "type": "block",
+          "content": {
+            "mod": "abs",
+            "props": {
+              "part": "header"
+            }
+          },
+          "size": {
+            "px": 52
+          },
+          "window_drag": true
+        },
+        {
+          "id": "work-body",
+          "type": "row",
+          "children": [
+            {
+              "id": "thread",
+              "type": "column",
+              "children": [
+                {
+                  "id": "main",
+                  "type": "block",
+                  "content": {
+                    "tab": "active",
+                    "pane": {
+                      "border": {
+                        "width": 1,
+                        "color": "border"
+                      },
+                      "focus": {
+                        "width": 1,
+                        "color": "accent"
+                      },
+                      "radius": 8,
+                      "gap": 8
+                    }
+                  }
+                }
+              ],
+              "resizable": false
+            },
+            {
+              "id": "review",
+              "type": "column",
+              "children": [
+                {
+                  "id": "review-body",
+                  "type": "stack",
+                  "children": [
+                    {
+                      "id": "abs",
+                      "type": "block",
+                      "content": {
+                        "mod": "abs",
+                        "props": {
+                          "part": "panel"
+                        }
+                      }
+                    }
+                  ],
+                  "active": "abs"
+                }
+              ],
+              "size": {
+                "px": 300
+              },
+              "min": 240,
+              "max": 900,
+              "background": "canvas"
+            }
+          ],
+          "padding": [
+            8,
+            5.199999809265137
+          ],
+          "gap": 5.199999809265137
+        }
+      ],
+      "resizable": false
+    }
+  ],
+  "background": "canvas",
+  "terminal_padding": [
+    14,
+    12
+  ],
+  "titlebar": "none",
+  "traffic_lights": [
+    12,
+    16
+  ]
+}
