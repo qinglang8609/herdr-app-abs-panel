@@ -45,37 +45,35 @@ function where() {
   return { tab, space, p, dir: p?.cwd || space?.folder || null, on: machineOf(p?.terminal) ?? space?.machine ?? null };
 }
 
-// 空间的 machine 是 hc 里的显示名，ssh 实际用的地址在 hc machine ls 的 target 里。
-// 用户重命名机器只改 name，两个就不一样了，所以必须查 hc 拿 target。
-async function sshHost(name) {
-  try {
-    const r = await hc(["machine", "ls"]);
-    const want = String(name).toLowerCase();
-    for (const m of JSON.parse(r.stdout).machines) {
-      if (String(m.name).toLowerCase() === want) return m.target || m.name;
-    }
-  } catch { /* 查不到就用原名 */ }
-  return name;
-}
-
 async function openIn(choice) {
   const { dir, on } = where();
   if (!dir) return;
   const e = editors(win()?.platform, dir).find((x) => x[0] === choice) ?? editors(win()?.platform, dir)[0];
   setShared("studio.editor", e[0]);
-  if (!on) {
-    const r = await exec(e[2], e[3]).catch((err) => ({ code: 1, stderr: String(err) }));
-    if (r.code !== 0) notify({ title: `Couldn't open ${e[1]}`, body: (r.stderr || "").trim().split("\n")[0] || "Is it installed?", level: "error" });
-    return;
-  }
-  // 远程：本机编辑器 CLI 连过去，主机名用 hc 的 target，不是空间的显示名。
   const bin = choice === "zed"
     ? "/Applications/Zed.app/Contents/MacOS/cli"
     : "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code";
-  const host = await sshHost(on);
-  const args = choice === "zed" ? [`ssh://${host}${dir}`] : ["--remote", `ssh-remote+${host}`, dir];
-  const r = await exec(bin, args).catch((err) => ({ code: 1, stderr: String(err) }));
-  if (r.code !== 0) notify({ title: `Couldn't open ${e[1]} on ${on}`, body: (r.stderr || "").trim().split("\n")[0] || `ssh ${host} failed.`, level: "error" });
+  const fail = (err) => notify({
+    title: `Couldn't open ${e[1]}${on ? ` on ${on}` : ""}`,
+    body: String(err && (err.stderr || err.message || err)).trim().split("\n")[0] || "Is it installed?",
+    level: "error",
+  });
+  if (!on) {
+    exec(bin, [dir]).catch(fail);
+    return;
+  }
+  // 机器名（fnos）和 ssh 别名（FNOS）不一，先查 hc 拿 target。
+  hc(["machine", "ls"]).then((r) => {
+    let host = on;
+    try {
+      const name = String(on).toLowerCase();
+      for (const m of JSON.parse(r.stdout).machines) {
+        if (String(m.name).toLowerCase() === name) { host = m.target || m.name; break; }
+      }
+    } catch { /* 查不到就用原名 */ }
+    const args = choice === "zed" ? [`ssh://${host}${dir}`] : ["--remote", `ssh-remote+${host}`, dir];
+    return exec(bin, args);
+  }).catch(fail);
 }
 
 function button(t, id, children, onClick, { tip, framed = true, on = false, hoverBg = true } = {}) {
