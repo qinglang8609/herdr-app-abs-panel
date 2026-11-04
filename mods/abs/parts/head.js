@@ -10,7 +10,7 @@
 
 import { div, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { run, theme, shared, setShared, openOverlay, closeOverlay, exec, notify, nextCommand, props, home, readTextFile, window as win } from "herdr";
+import { run, theme, shared, setShared, openOverlay, closeOverlay, exec, notify, nextCommand, props, hc, window as win } from "herdr";
 import { icon, own, activeSpace, activeTab, lead, machineOf, isShown, toggleReview, toggleTerminal, terminalDrawer, diffStat } from "./lib.js";
 import { threadTitle, projectName } from "./side.js";
 
@@ -45,19 +45,16 @@ function where() {
   return { tab, space, p, dir: p?.cwd || space?.folder || null, on: machineOf(p?.terminal) ?? space?.machine ?? null };
 }
 
-// 空间名到 ssh 主机的映射。用户重命名机器时只改 name，ssh 用的地址在 target 里，
-// 所以不能拿空间名当主机名。读 hc 的 machines.json，不跑 hc（在 mod 里跑它会挂住）。
+// 空间的 machine 是 hc 里的显示名，ssh 实际用的地址在 hc machine ls 的 target 里。
+// 用户重命名机器只改 name，两个就不一样了，所以必须查 hc 拿 target。
 async function sshHost(name) {
   try {
-    const path = `${home()}/.local/state/herdr-core/default/machines.json`;
-    const text = await readTextFile(path);
-    if (text) {
-      const want = String(name).toLowerCase();
-      for (const m of JSON.parse(text)) {
-        if (String(m.name).toLowerCase() === want) return m.target || m.host || m.name;
-      }
+    const r = await hc(["machine", "ls"]);
+    const want = String(name).toLowerCase();
+    for (const m of JSON.parse(r.stdout).machines) {
+      if (String(m.name).toLowerCase() === want) return m.target || m.name;
     }
-  } catch { /* 读不到就退回原名 */ }
+  } catch { /* 查不到就用原名 */ }
   return name;
 }
 
