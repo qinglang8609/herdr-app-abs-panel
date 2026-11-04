@@ -51,49 +51,29 @@ function where() {
 //   2. ~/.ssh/config 里 Host 行的别名
 //   3. 实在找不到就用原名
 // 在 Header.init 的 cx.spawn 里预先查好，点击时同步读，不在回调里等 Promise。
-const HOSTS = new Map();
-
-// 空间的 machine 是显示名，可能被改过（MACOS 改成 macos），ssh 对大小写敏感。
-// ssh 认的是 ~/.ssh/config 里 Host 行的原名，所以读它建大小写无关的索引。
-// 只读文件，不碰 hc —— hc 的 Promise 在某些调用路径里不回来，会挡住后面的代码。
-async function loadHosts() {
-  try {
-    const text = await readTextFile(`${home()}/.ssh/config`);
-    for (const line of String(text ?? "").split("\n")) {
-      const m = /^\s*Host\s+(.+)$/i.exec(line);
-      if (!m) continue;
-      for (const alias of m[1].trim().split(/\s+/)) {
-        if (alias && !alias.includes("*") && !alias.includes("?")) {
-          HOSTS.set(alias.toLowerCase(), alias);
-        }
-      }
-    }
-  } catch { /* 读不到就用原名 */ }
-}
-
 async function openIn(choice) {
   const { dir, on } = where();
   if (!dir) return;
-  // 索引没建好就先建（只读 ~/.ssh/config，很快，不碰 hc）。
-  if (!HOSTS.size) await loadHosts();
   const e = editors(win()?.platform, dir).find((x) => x[0] === choice) ?? editors(win()?.platform, dir)[0];
   setShared("studio.editor", e[0]);
-  const bin = choice === "zed"
-    ? "/Applications/Zed.app/Contents/MacOS/cli"
-    : "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code";
   const fail = (err) => notify({
     title: `Couldn't open ${e[1]}${on ? ` on ${on}` : ""}`,
     body: String(err && (err.stderr || err.message || err)).split("\n")[0] || "Is it installed?",
     level: "error",
   });
+  const bin = choice === "zed"
+    ? "/Applications/Zed.app/Contents/MacOS/cli"
+    : "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code";
+  // 一条 sh 干完：在 ~/.ssh/config 里大小写无关地找真名（macos → MACOS），
+  // 找不到就用原名，然后开编辑器。全程一次 exec，不在回调里等任何 Promise。
+  const script = choice === "zed"
+    ? `host=$(awk -v k='${String(on ?? "").replace(/'/g, "")}' 'tolower($1)=="host"{for(i=2;i<=NF;i++) if(tolower($i)==k){print $i; exit}}' "$HOME/.ssh/config" 2>/dev/null); exec "${bin}" "ssh://\${host:-${on}}"'${dir}'`
+    : `host=$(awk -v k='${String(on ?? "").replace(/'/g, "")}' 'tolower($1)=="host"{for(i=2;i<=NF;i++) if(tolower($i)==k){print $i; exit}}' "$HOME/.ssh/config" 2>/dev/null); exec "${bin}" --remote "ssh-remote+\${host:-${on}}" '${dir}'`;
   if (!on) {
     exec(bin, [dir]).catch(fail);
     return;
   }
-  // 只发一次。优先用 hc 查到的 target，没有才退回机器名。
-  const host = HOSTS.get(String(on).toLowerCase()) ?? on;
-  const args = choice === "zed" ? [`ssh://${host}${dir}`] : ["--remote", `ssh-remote+${host}`, dir];
-  exec(bin, args).catch(fail);
+  exec("sh", ["-c", script]).catch(fail);
 }
 
 function button(t, id, children, onClick, { tip, framed = true, on = false, hoverBg = true } = {}) {
@@ -123,8 +103,6 @@ export class Header {
     this.stat = null;
     this.statKey = null;
     this.refresh(cx);
-    // 先把机器名到 ssh target 的映射查好，点 Open 时才能同步拿到。
-    cx.spawn(async () => { await loadHosts(); });
     cx.timer.every(4000, (cx) => this.refresh(cx));
     cx.spawn(async (cx) => {
       for (;;) {
