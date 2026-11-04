@@ -10,7 +10,7 @@
 
 import { div, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { run, theme, shared, setShared, openOverlay, closeOverlay, exec, notify, nextCommand, props, hc, window as win } from "herdr";
+import { run, theme, shared, setShared, openOverlay, closeOverlay, exec, notify, nextCommand, props, hc, home, readTextFile, window as win } from "herdr";
 import { icon, own, activeSpace, activeTab, lead, machineOf, isShown, toggleReview, toggleTerminal, terminalDrawer, diffStat } from "./lib.js";
 import { threadTitle, projectName } from "./side.js";
 
@@ -45,6 +45,36 @@ function where() {
   return { tab, space, p, dir: p?.cwd || space?.folder || null, on: machineOf(p?.terminal) ?? space?.machine ?? null };
 }
 
+// 机器名 → ssh 主机名。空间的 machine 是这里的显示名，可能被改过（macos），
+// 而 ssh 认的是 ~/.ssh/config 里的 Host（MACOS）。三个来源都查一遍，大小写不敏感匹配：
+//   1. hc machine ls 的 target
+//   2. ~/.ssh/config 里 Host 行的别名
+//   3. 实在找不到就用原名
+// 在 Header.init 的 cx.spawn 里预先查好，点击时同步读，不在回调里等 Promise。
+const HOSTS = new Map();
+
+async function loadHosts() {
+  const add = (name, host) => {
+    if (name && host) HOSTS.set(String(name).toLowerCase(), host);
+  };
+  // hc 里登记的机器及其 target
+  try {
+    const r = await hc(["machine", "ls"]);
+    for (const m of JSON.parse(r.stdout).machines) add(m.name, m.target || m.name);
+  } catch { /* 没有就跳过 */ }
+  // ~/.ssh/config 的 Host 别名：ssh 对大小写敏感，这里按小写建索引
+  try {
+    const text = await readTextFile(`${home()}/.ssh/config`);
+    for (const line of String(text ?? "").split("\n")) {
+      const m = /^\s*Host\s+(.+)$/i.exec(line);
+      if (!m) continue;
+      for (const alias of m[1].trim().split(/\s+/)) {
+        if (alias && !alias.includes("*") && !alias.includes("?")) add(alias, alias);
+      }
+    }
+  } catch { /* 读不到就跳过 */ }
+}
+
 async function openIn(choice) {
   const { dir, on } = where();
   if (!dir) return;
@@ -53,10 +83,6 @@ async function openIn(choice) {
   const bin = choice === "zed"
     ? "/Applications/Zed.app/Contents/MacOS/cli"
     : "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code";
-  const open = (host) => {
-    const args = choice === "zed" ? [`ssh://${host}${dir}`] : ["--remote", `ssh-remote+${host}`, dir];
-    exec(bin, args).catch(() => null);
-  };
   const fail = (err) => notify({
     title: `Couldn't open ${e[1]}${on ? ` on ${on}` : ""}`,
     body: String(err && (err.stderr || err.message || err)).split("\n")[0] || "Is it installed?",
@@ -66,18 +92,10 @@ async function openIn(choice) {
     exec(bin, [dir]).catch(fail);
     return;
   }
-  // 只开一次。target 是真 ssh 地址，查得到就用它；查不到才用机器名。
-  // 不用 await：在 mod 里 await 会把整条链挂住。
-  hc(["machine", "ls"]).then((r) => {
-    let host = on;
-    try {
-      const want = String(on).toLowerCase();
-      for (const m of JSON.parse(r.stdout).machines) {
-        if (String(m.name).toLowerCase() === want) { host = m.target || m.name; break; }
-      }
-    } catch { /* 查不到就用原名 */ }
-    open(host);
-  }).catch(() => open(on));
+  // 只发一次。优先用 hc 查到的 target，没有才退回机器名。
+  const host = HOSTS.get(String(on).toLowerCase()) ?? on;
+  const args = choice === "zed" ? [`ssh://${host}${dir}`] : ["--remote", `ssh-remote+${host}`, dir];
+  exec(bin, args).catch(fail);
 }
 
 function button(t, id, children, onClick, { tip, framed = true, on = false, hoverBg = true } = {}) {
@@ -107,6 +125,8 @@ export class Header {
     this.stat = null;
     this.statKey = null;
     this.refresh(cx);
+    // 先把机器名到 ssh target 的映射查好，点 Open 时才能同步拿到。
+    cx.spawn(async () => { await loadHosts(); });
     cx.timer.every(4000, (cx) => this.refresh(cx));
     cx.spawn(async (cx) => {
       for (;;) {
