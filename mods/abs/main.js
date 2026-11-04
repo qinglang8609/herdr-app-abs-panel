@@ -19,6 +19,7 @@ import Spaces from "./parts/spaces.js";
 import SpacesBar from "./parts/spaces-bar.js";
 import Agents from "./parts/agents.js";
 import SpaceIcon from "./parts/space-icon.js";
+import Menu from "./parts/menu.js";
 import AbsPanel from "./parts/panel.js";
 
 const PARTS = {
@@ -33,6 +34,7 @@ const PARTS = {
   "open-menu": OpenMenu,
   "quick-open": QuickOpen,
   "space-icon": SpaceIcon,
+  menu: Menu,
 };
 
 export default class Abs extends View {

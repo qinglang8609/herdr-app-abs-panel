@@ -266,7 +266,7 @@ export class Sidebar {
       })
       .on_click(() => (tab.settled ? run("tab.unsettle", { id: tab.id }) : run("tab.select", { id: tab.id })))
       .on_mouse_down("right", () =>
-        openOverlay({ mod: "menu", kind: "popup", width: 200, props: { tab: "tab", target: { id: tab.id, space: space.id, settled: tab.settled } } }),
+        openOverlay({ mod: "abs", kind: "popup", width: 200, props: { part: "menu", tab: "tab", target: { id: tab.id, space: space.id, settled: tab.settled } } }),
       )
       .child(h_flex().w(16).flex_none().justify_center().child(this.status(t, tab, list === "pinned") ?? div()))
       .child(
@@ -382,12 +382,12 @@ export class Sidebar {
             cx.notify();
           })
           .on_click(() => this.toggleProject(space.id))
-          .on_mouse_down("right", () => openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: { tab: "space", target: { id: space.id } } }))
+          .on_mouse_down("right", () => openOverlay({ mod: "abs", kind: "popup", width: 200, height: 260, props: { part: "menu", tab: "space", target: { id: space.id } } }))
           .child(div().flex_1().min_w(0).truncate().child(projectName(space)))
           .when(Boolean(space.machine), (el) => el.child(div().flex_none().px(5).rounded(4).bg(t.hover).text_size(11).text_color(t.muted).child(space.machine)))
           .when(hovered, (el) =>
             el
-              .child(this.tool(`st-pmenu-${space.id}`, "ellipsis", "Project", () => openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: { tab: "space", target: { id: space.id } } }), t, 14))
+              .child(this.tool(`st-pmenu-${space.id}`, "ellipsis", "Project", () => openOverlay({ mod: "abs", kind: "popup", width: 200, height: 260, props: { part: "menu", tab: "space", target: { id: space.id } } }), t, 14))
               .child(this.tool(`st-pnew-${space.id}`, "square-pen", "New thread", () => this.newThread(space), t, 14)),
           ),
       )

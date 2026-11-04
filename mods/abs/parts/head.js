@@ -141,7 +141,7 @@ export class Header {
           .child(div().flex_none().max_w(200).truncate().text_size(13.5).text_color(t.dim).child(projectName(space)))
           .child(
             button(t, "sh-menu", [svg(icon("ellipsis")).size(16)], () =>
-              openOverlay({ mod: "menu", kind: "popup", width: 200, props: { tab: "tab", target: { id: tab.id, space: space.id, settled: tab.settled } } }), { framed: false, tip: "Thread" }),
+              openOverlay({ mod: "abs", kind: "popup", width: 200, props: { part: "menu", tab: "tab", target: { id: tab.id, space: space.id, settled: tab.settled } } }), { framed: false, tip: "Thread" }),
           ),
       )
       .child(div().flex_1())
@@ -182,7 +182,7 @@ export class Header {
                   .rounded_r(8)
                   .cursor_pointer()
                   .hover((s) => hoverBg ? s.bg(t.hover).text_color(t.foreground) : s.text_color(t.foreground))
-                  .on_click(() => openOverlay({ mod: "studio", kind: "popup", width: 200, props: { part: "open-menu" } }))
+                  .on_click(() => openOverlay({ mod: "abs", kind: "popup", width: 200, props: { part: "open-menu" } }))
                   .child(svg(icon("chevron-down")).size(13)),
               ),
           ),
@@ -201,7 +201,7 @@ export class Header {
           t,
           "sh-quick",
           [svg(icon("code-xml")).size(15)],
-          () => openOverlay({ mod: "studio", kind: "popup", width: 180, props: { part: "quick-open" } }),
+          () => openOverlay({ mod: "abs", kind: "popup", width: 180, props: { part: "quick-open" } }),
           { framed: false, tip: "Open" },
         ),
       )

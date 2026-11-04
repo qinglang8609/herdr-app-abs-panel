@@ -5,7 +5,7 @@
 import { svg, image } from "gpui-kit";
 import { spaces, panes, agents, focused, layout, appHome, readTextFile, writeTextFile, exec, notify } from "herdr";
 
-export const MOD = "studio";
+export const MOD = "abs";
 export const icon = (name) => `mods/${MOD}/icons/${name}.svg`;
 
 // A theme color with an alpha, for tints ("#5fc77a" + 0.14 -> "#5fc77a24").
