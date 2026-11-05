@@ -96,6 +96,15 @@ export default class Spaces extends View {
     // `git status` walks the whole tree, on another machine a process there:
     // only when its answer could have changed (see `due`).
     cx.timer.every(250, (cx) => this.checkNew(cx));
+    // agent 的状态变了（working/done/blocked）就重画一次。只在真的变了才 notify，
+    // 闲着时不打扰。spins 的动画自己走，不需要这里驱动。
+    this.agentKey = this.agentStates();
+    cx.timer.every(1000, (cx) => {
+      const now = this.agentStates();
+      if (now === this.agentKey) return;
+      this.agentKey = now;
+      cx.notify();
+    });
   }
 
   checkNew(cx) {
@@ -368,9 +377,15 @@ export default class Spaces extends View {
   }
 
   // 一个工作区里正在跑的 agent：一个 app 一个圆圈，圆里放它的图标。
+  // 一个工作区里正在跑的 agent：一个 agent 一个圆圈，圆里是它的图标。
+  // 状态按 agents() 的 status 画，跟左侧 Agents 列表同一套语言：
+  //   working 转圈 / blocked 蓝色带 ! / done 蓝色圆点 / idle 只剩图标
+  // 所有 agent 的状态拼成一个串，用来判断要不要重画。
+  agentStates() {
+    return (agents() || []).map((a) => `${a.address}:${a.status}`).join(",");
+  }
+
   agentDots(t, list) {
-    // 叠着排，圆心距 10px（18 的圆叠 8px，看得出是两个又不散开）。
-    // 绝对定位摆位，先写的画在上层 —— 左边的压住右边。
     const n = Math.min(list.length, 4);
     const wpx = 18 + (n - 1) * 10;
     const items = list.slice(0, 4);
@@ -378,14 +393,24 @@ export default class Spaces extends View {
       .children(items.map((a, i) => {
         const prog = a.program;
         const name = a.app || "agent";
-        return div()
+        const st = a.status;
+        // 边框颜色表示状态；working 用 spinner 替掉边框。
+        const ring = st === "blocked" ? t.blocked : st === "done" ? t.done ?? t.ansi4 : t.border;
+        const dot = div()
           .absolute().top(0).left(i * 10)
           .size(18).flex_none().rounded(9).flex().items_center().justify_center()
-          .bg(prog?.tile ?? t.raised).border_1().border_color(t.border).tooltip(name)
+          .bg(prog?.tile ?? t.raised)
+          .border_1().border_color(ring)
+          .tooltip(st ? `${name} · ${st}` : name)
           .child(prog?.icon
             ? (prog.tint ? svg(prog.icon).size(12).flex_none().text_color(prog.color ?? t.foreground)
                          : image(prog.icon).w(12).h(12).flex_none())
             : div().text_size(9).text_color(t.foreground).child(name.slice(0, 1)));
+        // working：沿圆圈边缘转一道弧，不占额外空间。
+        return st === "working"
+          ? dot.child(div().absolute().top(0).left(0).size(18).flex_none()
+              .child(svg("mods/abs/icons/ring-spin.svg").size(18).text_color(t.working).spin(900)))
+          : dot;
       }))
       .when(list.length > 4, (el) => el.child(div().absolute().top(0).left(wpx + 2).text_size(10).text_color(t.dim).child(`+${list.length - 4}`)));
   }
