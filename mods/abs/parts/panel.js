@@ -261,7 +261,9 @@ function parseLog(text) {
     const text = (bar < 0 ? rest : rest.slice(bar + 3)).trim();
     out.push({ when, who: who?.[1] ?? "", kind, text });
   }
-  return out.reverse();
+  // 按时间戳排，新的在前。不能只 reverse：log.md 里的行不保证严格追加，
+  // 早先的记录可能写在后面，光反转发会把日期搞乱。
+  return out.sort((a, b) => String(b.when).localeCompare(String(a.when)));
 }
 
 // ── 面板 ─────────────────────────────────
