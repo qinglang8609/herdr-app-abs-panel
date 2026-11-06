@@ -288,7 +288,14 @@ export default class Spaces extends View {
   // Spaces in order, each worktree space moved under its main checkout's.
   ordered() {
     const sp = spaces(), ps = panes();
-    const ready = (w) => this.shown.has(w.id) || where(w, ps) in this.git || Date.now() - (this.born[w.id] ??= Date.now()) > 1500;
+    const ready = (w) => {
+      if (this.shown.has(w.id)) return true;
+      if (where(w, ps) in this.git) return true;
+      // 1.5 秒还没等到 git 结果也放行，否则一个卡住的机器会让整块列表停在 Loading。
+      // born 只在第一次见到时记，后面不再刷新，否则永远到不了 1.5 秒。
+      if (this.born[w.id] === undefined) this.born[w.id] = Date.now();
+      return Date.now() - this.born[w.id] > 1500;
+    };
     for (const w of sp) if (!this.shown.has(w.id) && ready(w)) this.shown.add(w.id);
     const list = sp.map((w, i) => ({ w, i, g: this.git[where(w, ps)] ?? null })).filter((r) => this.shown.has(r.w.id));
     const mains = new Set(list.filter((r) => r.g && !r.g.linked).map((r) => r.g.repo));
@@ -406,10 +413,11 @@ export default class Spaces extends View {
             ? (prog.tint ? svg(prog.icon).size(12).flex_none().text_color(prog.color ?? t.foreground)
                          : image(prog.icon).w(12).h(12).flex_none())
             : div().text_size(9).text_color(t.foreground).child(name.slice(0, 1)));
-        // working：沿圆圈边缘转一道弧，不占额外空间。
+        // working：圈子外圈套一道转动的弧。svg 必须直接做子元素 —— 套一层容器后
+        // spin 不再驱动它，只画出静止的弧。
         return st === "working"
-          ? dot.child(div().absolute().top(0).left(0).size(18).flex_none()
-              .child(svg("mods/abs/icons/ring-spin.svg").size(18).text_color(t.working).spin(900)))
+          ? dot.child(svg("mods/abs/icons/ring-spin.svg").size(22).absolute().top(-2).left(-2)
+              .text_color(t.working).spin(900))
           : dot;
       }))
       .when(list.length > 4, (el) => el.child(div().absolute().top(0).left(wpx + 2).text_size(10).text_color(t.dim).child(`+${list.length - 4}`)));

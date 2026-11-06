@@ -51,6 +51,15 @@ function where() {
 //   2. ~/.ssh/config 里 Host 行的别名
 //   3. 实在找不到就用原名
 // 在 Header.init 的 cx.spawn 里预先查好，点击时同步读，不在回调里等 Promise。
+// 点四页按钮时，先确保当前目录有 .brain —— 没有就跑一次 abs init。
+// 只在后台起，不 await：abs init 要写文件，等它会拖慢切换。
+function ensureBrain() {
+  const { dir, on } = where();
+  if (!dir) return;
+  exec("sh", ["-c", `cd "${dir}" 2>/dev/null || exit 0; [ -d .brain ] || abs init >/dev/null 2>&1`],
+    on ? { on } : undefined).catch(() => null);
+}
+
 async function openIn(choice) {
   const { dir, on } = where();
   if (!dir) return;
@@ -238,6 +247,7 @@ export class Header {
             () => {
               if (on) run("layout.hide", { id: "review" });
               else {
+                ensureBrain();
                 setShared("abs.view", id);
                 if (!reviewOpen) run("layout.show", { id: "review" });
               }
