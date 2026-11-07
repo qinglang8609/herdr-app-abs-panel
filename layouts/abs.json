@@ -114,7 +114,7 @@
                       },
                       "focus": {
                         "width": 1,
-                        "color": "ansi2"
+                        "color": "#4A505D"
                       },
                       "radius": 8,
                       "gap": 8

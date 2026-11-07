@@ -8,6 +8,14 @@ import { spaces, panes, focused, readTextFile, writeTextFile, watchFolder, exec,
 
 const LIMIT = 200;
 
+// 字号：跟左侧栏（side.js / spaces.js 用 12 / 12.5 / 13）对齐，
+// 面板正文不再自留小一号。要统一调就改这五个值。
+const FS_CARD = 12.5;   // 卡片标题
+const FS_ITEM = 12;     // 条目标题（任务、日志、会话、图谱分区）
+const FS_BODY = 11.5;   // 正文、空态提示
+const FS_META = 10.5;   // 日期、徽章计数、分区标签、分页
+const FS_BADGE = 10;    // 带底色的状态徽章（白字）
+
 function norm(p) {
   return String(p || "").replace(/\/+$/, "");
 }
@@ -491,8 +499,8 @@ export default class AbsPanel extends View {
       .border_1().border_color(t.border)
       .when(fill > 0, (e) => e.flex_grow(fill).flex_basis(0).min_h(0), (e) => e.flex_none())
       .child(h_flex().h(32).flex_none().px(9).gap(6).items_center().border_b(1).border_color(t.border)
-        .child(div().text_size(11).font_semibold().text_color(t.foreground).child(title))
-        .when(badge != null, (e) => e.child(div().px(5).rounded(4).bg(t.chrome).text_size(9.5).text_color(t.muted).child(String(badge))))
+        .child(div().text_size(FS_CARD).font_semibold().text_color(t.foreground).child(title))
+        .when(badge != null, (e) => e.child(div().px(5).rounded(4).bg(t.chrome).text_size(FS_BADGE).text_color(t.muted).child(String(badge))))
         .child(div().flex_1()))
       .child(
         fill > 0
@@ -649,15 +657,15 @@ export default class AbsPanel extends View {
       // 第一行：状态点 + 标题，右侧是状态标签和子项数。
       .child(h_flex().gap(6).items_center()
         .child(div().size(6).flex_none().rounded(3).bg(dot))
-        .child(div().flex_1().min_w(0).truncate().text_size(11).font_semibold().text_color(t.foreground).child(task.title))
-        .when(Boolean(task.state), (e) => e.child(div().flex_none().px(5).py(1).rounded(4).bg(this.stateBadge(t, task.state)).text_size(9).text_color("#ffffff").child(task.state))))
+        .child(div().flex_1().min_w(0).truncate().text_size(FS_ITEM).font_semibold().text_color(t.foreground).child(task.title))
+        .when(Boolean(task.state), (e) => e.child(div().flex_none().px(5).py(1).rounded(4).bg(this.stateBadge(t, task.state)).text_size(FS_BADGE).text_color("#ffffff").child(task.state))))
       // 第二行：描述，没有就不画这一行
       .when(Boolean(detail), (e) =>
-        e.child(div().w_full().min_w(0).truncate().text_size(9).text_color(t.dim).child(detail)),
+        e.child(div().w_full().min_w(0).truncate().text_size(FS_META).text_color(t.dim).child(detail)),
       )
       // 第三行：只有日期就画，没有就不占位置。
       .when(Boolean(task.date), (e) =>
-        e.child(div().w_full().text_size(9).text_color(t.dim).child(task.date)),
+        e.child(div().w_full().text_size(FS_META).text_color(t.dim).child(task.date)),
       )
       // 子项：在下面按树形列出来，最后一条用 └─。
       .when(kids.length > 0, (e) =>
@@ -674,11 +682,11 @@ export default class AbsPanel extends View {
                   .child(
                     div()
                       .flex_none()
-                      .text_size(9)
+                      .text_size(FS_META)
                       .text_color(t.dim)
                       .child(`${i === kids.length - 1 ? "└─" : "├─"} ${kid.done ? "☑" : "☐"}`),
                   )
-                  .child(div().flex_1().min_w(0).truncate().text_size(9.5).text_color(kid.done ? t.dim : t.muted).child(kid.text)),
+                  .child(div().flex_1().min_w(0).truncate().text_size(FS_META).text_color(kid.done ? t.dim : t.muted).child(kid.text)),
               ),
             ),
         ),
@@ -691,8 +699,8 @@ export default class AbsPanel extends View {
             .mt(2)
             .pl(9)
             .gap(2)
-            .when(Boolean(this.logMissing), (x) => x.child(div().text_size(9).text_color(t.ansi1).child(this.logMissing)))
-            .when(this.logTasks.length === 0 && !this.logMissing, (x) => x.child(div().text_size(9).text_color(t.dim).child("这份记录里没有任务")))
+            .when(Boolean(this.logMissing), (x) => x.child(div().text_size(FS_META).text_color(t.ansi1).child(this.logMissing)))
+            .when(this.logTasks.length === 0 && !this.logMissing, (x) => x.child(div().text_size(FS_META).text_color(t.dim).child("这份记录里没有任务")))
             .children(
               this.logTasks.map((x) =>
                 v_flex()
@@ -703,14 +711,14 @@ export default class AbsPanel extends View {
                       .gap(5)
                       .items_center()
                       .child(div().w(1).h(11).flex_none().rounded(1).bg(x.done ? t.ansi3 : t.border))
-                      .child(div().flex_1().min_w(0).truncate().text_size(10).text_color(t.muted).child(x.title))
-                      .when(Boolean(x.verdict), (el) => el.child(div().text_size(9).text_color(t.dim).child(x.verdict))),
+                      .child(div().flex_1().min_w(0).truncate().text_size(FS_BODY).text_color(t.muted).child(x.title))
+                      .when(Boolean(x.verdict), (el) => el.child(div().text_size(FS_META).text_color(t.dim).child(x.verdict))),
                   )
                   .when(Boolean(x.note && x.note !== x.title), (el) =>
-                    el.child(div().pl(6).text_size(9).text_color(t.dim).truncate().child(x.note)),
+                    el.child(div().pl(6).text_size(FS_META).text_color(t.dim).truncate().child(x.note)),
                   )
                   .children((x.children ?? []).map((k) =>
-                    div().pl(6).text_size(9).text_color(t.dim).truncate().child(`${k.done ? "☑" : "☐"} ${k.text}`),
+                    div().pl(6).text_size(FS_META).text_color(t.dim).truncate().child(`${k.done ? "☑" : "☐"} ${k.text}`),
                   )),
               ),
             ),
@@ -753,7 +761,7 @@ export default class AbsPanel extends View {
           this.boardPage = to;
           cx.notify();
         })
-        .child(div().text_size(9.5).child(label));
+        .child(div().text_size(FS_META).child(label));
     const footer =
       pages > 1
         ? h_flex()
@@ -767,7 +775,7 @@ export default class AbsPanel extends View {
             .border_t(1)
             .border_color(t.border)
             .child(btn("abs-board-prev", "‹ Prev", page - 1, page > 0))
-            .child(div().text_size(9).text_color(t.muted).child(`${page + 1} / ${pages}`))
+            .child(div().text_size(FS_META).text_color(t.muted).child(`${page + 1} / ${pages}`))
             .child(btn("abs-board-next", "Next ›", page + 1, page < pages - 1))
         : null;
 
@@ -786,7 +794,7 @@ export default class AbsPanel extends View {
 
   // 卡片里的空提示：占一段高度，文字水平垂直居中。
   emptyNote(t, text) {
-    return div().w_full().flex_none().h(64).flex().items_center().justify_center().text_size(10).text_color(t.dim).child(text);
+    return div().w_full().flex_none().h(64).flex().items_center().justify_center().text_size(FS_BODY).text_color(t.dim).child(text);
   }
 
   // 最近完成：单独一张卡，与看板并列。
@@ -803,8 +811,8 @@ export default class AbsPanel extends View {
           .bg(t.raised).cursor_pointer().hover((el) => el.bg(t.chrome))
           .on_click(() => this.openDetail("section", s))
           .child(div().size(7).flex_none().rounded(4).bg(t.ansi6))
-          .child(div().flex_1().min_w(0).truncate().text_size(10.5).font_semibold().text_color(t.foreground).child(s.name))
-          .child(div().text_size(9.5).text_color(t.muted).child(`${s.items.length || s.stated || 0} 页`))) : [div().px(6).text_size(10).text_color(t.dim).child("索引为空")]),
+          .child(div().flex_1().min_w(0).truncate().text_size(FS_ITEM).font_semibold().text_color(t.foreground).child(s.name))
+          .child(div().text_size(FS_META).text_color(t.muted).child(`${s.items.length || s.stated || 0} 页`))) : [div().px(6).text_size(FS_BODY).text_color(t.dim).child("索引为空")]),
       ],
     );
   }
@@ -826,24 +834,24 @@ export default class AbsPanel extends View {
       [
         ...(shown.length ? shown.map((text, i) => h_flex().w_full().flex_none().gap(6).items_center().px(7).py(6).rounded(7)
           .bg(t.raised).hover((el) => el.bg(t.chrome))
-          .child(div().text_size(9).flex_none().text_color(t.ansi6).child(`${i + 1}`))
-          .child(div().flex_1().min_w(0).text_size(10).text_color(t.foreground).child(text))
+          .child(div().text_size(FS_META).flex_none().text_color(t.ansi6).child(`${i + 1}`))
+          .child(div().flex_1().min_w(0).text_size(FS_BODY).text_color(t.foreground).child(text))
           .when(editable, (e) => e.child(div().id(`abs-rule-del-${i}`).size(18).flex_none().flex().items_center().justify_center()
-            .rounded(5).text_size(10).text_color(t.dim).cursor_pointer()
+            .rounded(5).text_size(FS_BODY).text_color(t.dim).cursor_pointer()
             .hover((s) => s.bg(t.hover).text_color(t.ansi1))
-            .on_click(() => this.removeRule(i)).child("×")))) : [div().px(6).text_size(10).text_color(t.dim).child("还没有铁律")]),
-        ...(hidden > 0 ? [h_flex().id("abs-rule-more").h(22).px(6).flex_none().items_center().text_size(9.5).text_color(t.dim)
+            .on_click(() => this.removeRule(i)).child("×")))) : [div().px(6).text_size(FS_BODY).text_color(t.dim).child("还没有铁律")]),
+        ...(hidden > 0 ? [h_flex().id("abs-rule-more").h(22).px(6).flex_none().items_center().text_size(FS_META).text_color(t.dim)
           .cursor_pointer().hover((s) => s.text_color(t.foreground))
           .on_click((_e, cx) => { this.rulesOpen = true; cx.notify(); }).child(`还有 ${hidden} 条，展开`)] : []),
-        ...(expanded && rules.length > LIMIT ? [h_flex().id("abs-rule-less").h(22).px(6).flex_none().items_center().text_size(9.5).text_color(t.dim)
+        ...(expanded && rules.length > LIMIT ? [h_flex().id("abs-rule-less").h(22).px(6).flex_none().items_center().text_size(FS_META).text_color(t.dim)
           .cursor_pointer().hover((s) => s.text_color(t.foreground))
           .on_click((_e, cx) => { this.rulesOpen = false; cx.notify(); }).child("收起")] : []),
         editable
           ? h_flex().id("abs-rule-add").mt(2).h(26).px(8).flex_none().items_center().justify_center().gap(5).rounded(7)
-            .text_size(10).text_color(t.dim).cursor_pointer()
+            .text_size(FS_BODY).text_color(t.dim).cursor_pointer()
             .hover((s) => s.bg(t.chrome).text_color(t.foreground))
             .on_click(() => this.addRule()).child("+ 添加铁律")
-          : div().px(6).text_size(9.5).text_color(t.dim).child(this.brainOn ? `${this.brainOn} 上的文件改不了，只能看` : "没找到 index.md"),
+          : div().px(6).text_size(FS_META).text_color(t.dim).child(this.brainOn ? `${this.brainOn} 上的文件改不了，只能看` : "没找到 index.md"),
       ],
     );
   }
@@ -918,22 +926,22 @@ export default class AbsPanel extends View {
             .hover((el) => el.bg(t.chrome))
             .on_click(() => this.openDetail("entry", e))
             // 第一行：标题
-            .child(div().w_full().min_w(0).truncate().text_size(11).font_semibold().text_color(t.foreground).child(title))
+            .child(div().w_full().min_w(0).truncate().text_size(FS_ITEM).font_semibold().text_color(t.foreground).child(title))
             // 第二行：详情
             .when(Boolean(detail), (el) =>
-              el.child(div().w_full().min_w(0).truncate().text_size(9).text_color(t.dim).child(detail)),
+              el.child(div().w_full().min_w(0).truncate().text_size(FS_META).text_color(t.dim).child(detail)),
             )
             // 第三行：作者在左，时间在右
             .child(
               h_flex()
                 .gap(6)
                 .items_center()
-                .child(div().text_size(9).text_color(t.dim).child(e.who || ""))
+                .child(div().text_size(FS_META).text_color(t.dim).child(e.who || ""))
                 .child(div().flex_1())
-                .child(div().text_size(9).text_color(t.dim).child(e.when)),
+                .child(div().text_size(FS_META).text_color(t.dim).child(e.when)),
             );
         })
-      : [div().w_full().py(10).text_size(10).text_color(t.dim).text_center().child("还没有日志")];
+      : [div().w_full().py(10).text_size(FS_BODY).text_color(t.dim).text_center().child("还没有日志")];
 
     const btn = (id, label, to, on) =>
       h_flex()
@@ -951,7 +959,7 @@ export default class AbsPanel extends View {
           this.logPage = to;
           cx.notify();
         })
-        .child(div().text_size(9.5).child(label));
+        .child(div().text_size(FS_META).child(label));
 
     // 翻页条固定在卡片底部，不跟着列表滚。
     const footer =
@@ -967,7 +975,7 @@ export default class AbsPanel extends View {
             .border_t(1)
             .border_color(t.border)
             .child(btn("abs-log-prev", "‹ Prev", page - 1, page > 0))
-            .child(div().text_size(9).text_color(t.muted).child(`${page + 1} / ${pages}`))
+            .child(div().text_size(FS_META).text_color(t.muted).child(`${page + 1} / ${pages}`))
             .child(btn("abs-log-next", "Next ›", page + 1, page < pages - 1))
         : null;
 
@@ -1046,7 +1054,7 @@ export default class AbsPanel extends View {
 
     const body = shown.length
       ? shown.map((x) => this.sessRow(x, bg))
-      : [div().px(6).py(8).text_size(10).text_color(t.dim).child("这个文件夹没有会话")];
+      : [div().px(6).py(8).text_size(FS_BODY).text_color(t.dim).child("这个文件夹没有会话")];
 
     const btn = (id, label, to, on) =>
       h_flex()
@@ -1064,7 +1072,7 @@ export default class AbsPanel extends View {
           this.sessPage = to;
           cx.notify();
         })
-        .child(div().text_size(9.5).child(label));
+        .child(div().text_size(FS_META).child(label));
 
     const footer =
       pages > 1
@@ -1079,7 +1087,7 @@ export default class AbsPanel extends View {
             .border_t(1)
             .border_color(t.border)
             .child(btn("abs-sess-prev", "‹ Prev", page - 1, page > 0))
-            .child(div().text_size(9).text_color(t.muted).child(`${page + 1} / ${pages}`))
+            .child(div().text_size(FS_META).text_color(t.muted).child(`${page + 1} / ${pages}`))
             .child(btn("abs-sess-next", "Next ›", page + 1, page < pages - 1))
         : null;
 
@@ -1226,13 +1234,13 @@ export default class AbsPanel extends View {
         if (had !== h) cx.notify();
       })
       .on_click((_e, cx) => this.sessResume(s, cx))
-      .child(div().w_full().min_w(0).truncate().text_size(11).font_semibold().text_color(arming ? t.background : t.foreground).child(title))
+      .child(div().w_full().min_w(0).truncate().text_size(FS_ITEM).font_semibold().text_color(arming ? t.background : t.foreground).child(title))
       .child(
         h_flex()
           .gap(6)
           .items_center()
-          .child(div().text_size(9).text_color(t.dim).child(ago(s.mtime)))
-          .child(div().text_size(9).text_color(t.dim).child(sizeText(s.size))),
+          .child(div().text_size(FS_META).text_color(t.dim).child(ago(s.mtime)))
+          .child(div().text_size(FS_META).text_color(t.dim).child(sizeText(s.size))),
       )
       // 删除按钮：平时藏着，鼠标落在这一行时在右侧垂直居中冒出来。无背景、不变色。
       .child(
@@ -1253,7 +1261,7 @@ export default class AbsPanel extends View {
                 cx.stop_propagation();
                 this.sessRemove(s, cx);
               })
-              .child(div().text_size(11).text_color(arming ? t.background : t.dim).child(arming ? "删?" : "×")),
+              .child(div().text_size(FS_ITEM).text_color(arming ? t.background : t.dim).child(arming ? "删?" : "×")),
           ),
       );
   }
@@ -1279,8 +1287,8 @@ export default class AbsPanel extends View {
       : [this.logCard(1)];
     return v_flex().id("abs-panel").size_full().min_h(0).text_color(t.foreground).bg(t.background)
       .child(div().flex_1().min_h(0).p(0).when(fillsPanel, (e) => e.flex(), (e) => e.overflow_y_scrollbar()).child(v_flex().gap(10).w_full().when(fillsPanel, (x) => x.flex_1().min_h(0))
-        .when(this.note != null, (e) => e.child(div().px(9).py(7).rounded(8).bg(t.raised).border_1().border_color(t.border).text_size(10).text_color(t.ansi3).child(this.note)))
-        .when(this.error != null, (e) => e.child(div().px(9).py(7).rounded(8).bg(t.raised).border_1().border_color(t.ansi1).text_size(10).text_color(t.ansi1).child(this.error)))
+        .when(this.note != null, (e) => e.child(div().px(9).py(7).rounded(8).bg(t.raised).border_1().border_color(t.border).text_size(FS_BODY).text_color(t.ansi3).child(this.note)))
+        .when(this.error != null, (e) => e.child(div().px(9).py(7).rounded(8).bg(t.raised).border_1().border_color(t.ansi1).text_size(FS_BODY).text_color(t.ansi1).child(this.error)))
         .children(body)));
   }
 }
