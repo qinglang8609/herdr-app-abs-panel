@@ -418,23 +418,22 @@ export default class Spaces extends View {
     const n = Math.min(list.length, 4);
     const wpx = 18 + (n - 1) * 10;
     const items = list.slice(0, 4);
-    // 圆圈照旧叠着画（圆心距 10），省横向空间。转圈弧单独一层、画在所有圆圈之后，于是
-    // 落在圆圈下面；弧正好贴在圆外那一圈（半径 10.8、线宽 2.4 → 内缘 9.6，不与直径 18
-    // 的圆重叠，所以不会被自己的圆裁掉），轮到相邻圆的地盘时被相邻圆盖住。
-    const spins = items.map((a, i) => a.status === "working"
-      ? svg("mods/abs/icons/ring-spin.svg").size(24).absolute().top(-3).left(i * 10 - 3)
-          .text_color(t.working).spin(900)
-      : null).filter(Boolean);
+    // 圆圈叠着画（圆心距 10）。working 的动画做在图标本身（图标转）和边框颜色上，
+    // 不再另画浮动的弧，也就没有图层压到邻居的问题。
     return div().relative().flex_none().flex_shrink(0).h(18).w(wpx)
       .children(items.map((a, i) => {
         const prog = a.program;
         const name = a.app || "agent";
         const st = a.status;
-        // 边框颜色表示状态，和左侧 Agents 列表同一套：done 蓝、blocked 蓝、其余灰。
+        // 边框颜色表示状态，和左侧 Agents 列表同一套：working 橙、done 蓝、blocked 蓝、其余灰。
         // core 的 done 一亮就被「看过」转成 idle，所以用 this.fresh 记住「刚干完还没看」。
         const fresh = Boolean(this.fresh[a.address]);
         const flagged = st === "done" || fresh;
-        const ring = st === "blocked" ? t.blocked : flagged ? t.done ?? t.ansi4 : t.border;
+        const ring = st === "blocked" ? t.blocked : st === "working" ? t.working : flagged ? t.done ?? t.ansi4 : t.border;
+        const icon = prog?.icon
+          ? (prog.tint ? svg(prog.icon).size(12).flex_none().text_color(prog.color ?? t.foreground)
+                       : image(prog.icon).w(12).h(12).flex_none())
+          : div().text_size(9).text_color(t.foreground).child(name.slice(0, 1));
         return div()
           .absolute().top(0).left(i * 10)
           .size(18).flex_none().rounded(9).flex().items_center().justify_center()
@@ -448,12 +447,8 @@ export default class Spaces extends View {
             cx.notify();
           })
           .tooltip(st ? `${name} · ${st}` : name)
-          .child(prog?.icon
-            ? (prog.tint ? svg(prog.icon).size(12).flex_none().text_color(prog.color ?? t.foreground)
-                         : image(prog.icon).w(12).h(12).flex_none())
-            : div().text_size(9).text_color(t.foreground).child(name.slice(0, 1)));
+          .child(st === "working" ? icon.spin(900) : icon);
       }))
-      .children(spins)
       .when(list.length > 4, (el) => el.child(div().absolute().top(0).left(wpx + 2).text_size(10).text_color(t.dim).child(`+${list.length - 4}`)));
   }
 
