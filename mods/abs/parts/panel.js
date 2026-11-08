@@ -776,22 +776,20 @@ export default class AbsPanel extends View {
           cx.notify();
         })
         .child(div().text_size(FS_META).child(label));
-    const footer =
-      pages > 1
-        ? h_flex()
-            .w_full()
-            .flex_none()
-            .h(32)
-            .px(8)
-            .gap(8)
-            .items_center()
-            .justify_center()
-            .border_t(1)
-            .border_color(t.border)
-            .child(btn("abs-board-prev", "‹ Prev", page - 1, page > 0))
-            .child(div().text_size(FS_META).text_color(t.muted).child(`${page + 1} / ${pages}`))
-            .child(btn("abs-board-next", "Next ›", page + 1, page < pages - 1))
-        : null;
+    // 只有一页也照常显示翻页条：页码显示 1，上一页/下一页自己置灰、点不动。
+    const footer = h_flex()
+      .w_full()
+      .flex_none()
+      .h(32)
+      .px(8)
+      .gap(8)
+      .items_center()
+      .justify_center()
+      .border_t(1)
+      .border_color(t.border)
+      .child(btn("abs-board-prev", "‹ Prev", page - 1, page > 0))
+      .child(div().text_size(FS_META).text_color(t.muted).child(`${page + 1} / ${pages}`))
+      .child(btn("abs-board-next", "Next ›", page + 1, page < pages - 1));
 
     return this.card(
       "看板",
@@ -975,23 +973,20 @@ export default class AbsPanel extends View {
         })
         .child(div().text_size(FS_META).child(label));
 
-    // 翻页条固定在卡片底部，不跟着列表滚。
-    const footer =
-      pages > 1
-        ? h_flex()
-            .w_full()
-            .flex_none()
-            .h(32)
-            .px(8)
-            .gap(8)
-            .items_center()
-            .justify_center()
-            .border_t(1)
-            .border_color(t.border)
-            .child(btn("abs-log-prev", "‹ Prev", page - 1, page > 0))
-            .child(div().text_size(FS_META).text_color(t.muted).child(`${page + 1} / ${pages}`))
-            .child(btn("abs-log-next", "Next ›", page + 1, page < pages - 1))
-        : null;
+    // 翻页条固定在卡片底部，不跟着列表滚；只有一页也显示（页码 1，两个按钮置灰）。
+    const footer = h_flex()
+      .w_full()
+      .flex_none()
+      .h(32)
+      .px(8)
+      .gap(8)
+      .items_center()
+      .justify_center()
+      .border_t(1)
+      .border_color(t.border)
+      .child(btn("abs-log-prev", "‹ Prev", page - 1, page > 0))
+      .child(div().text_size(FS_META).text_color(t.muted).child(`${page + 1} / ${pages}`))
+      .child(btn("abs-log-next", "Next ›", page + 1, page < pages - 1));
 
     return this.card("日志", all.length, body, fill, footer);
   }
@@ -1088,22 +1083,20 @@ export default class AbsPanel extends View {
         })
         .child(div().text_size(FS_META).child(label));
 
-    const footer =
-      pages > 1
-        ? h_flex()
-            .w_full()
-            .flex_none()
-            .h(32)
-            .px(8)
-            .gap(8)
-            .items_center()
-            .justify_center()
-            .border_t(1)
-            .border_color(t.border)
-            .child(btn("abs-sess-prev", "‹ Prev", page - 1, page > 0))
-            .child(div().text_size(FS_META).text_color(t.muted).child(`${page + 1} / ${pages}`))
-            .child(btn("abs-sess-next", "Next ›", page + 1, page < pages - 1))
-        : null;
+    // 只有一页也显示翻页条：页码 1，两个按钮置灰。
+    const footer = h_flex()
+      .w_full()
+      .flex_none()
+      .h(32)
+      .px(8)
+      .gap(8)
+      .items_center()
+      .justify_center()
+      .border_t(1)
+      .border_color(t.border)
+      .child(btn("abs-sess-prev", "‹ Prev", page - 1, page > 0))
+      .child(div().text_size(FS_META).text_color(t.muted).child(`${page + 1} / ${pages}`))
+      .child(btn("abs-sess-next", "Next ›", page + 1, page < pages - 1));
 
     return [this.card(this.machine ? `pi 会话 · ${this.machine}` : "pi 会话", list.length, body, 1, footer)];
   }
