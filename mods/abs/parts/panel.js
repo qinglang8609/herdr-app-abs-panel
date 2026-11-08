@@ -437,22 +437,36 @@ export default class AbsPanel extends View {
     const on = at.on;
     if (at.dir) {
       let dir = at.dir.replace(/\/$/, "");
+      // 同一个目录短时间内会反复进来（切页、5 秒表、文件变化都叫 refresh），
+      // 每次都从当前目录逐级往上摸一遍太贵：命中过就把答案记住。
+      // 失败的不记（目录里后来新建的 .brain 不能被挡住）。
+      const hitKey = `${on ?? ""}|${dir}`;
+      if (this.brainHit?.key === hitKey) return this.brainHit.dir;
       for (let i = 0; i < 8 && dir && dir !== "/"; i++) {
         const text = await readTextFile(`${dir}/.brain/todo.md`, { on }).catch(() => null);
-        if (text !== null) return `${dir}/.brain`;
+        if (text !== null) {
+          this.brainHit = { key: hitKey, dir: `${dir}/.brain` };
+          return this.brainHit.dir;
+        }
         const cut = dir.lastIndexOf("/");
         dir = cut <= 0 ? "" : dir.slice(0, cut);
       }
     }
-    // 家目录得问那台机器自己：远程的 HOME 往往不是本地那个。
+    // 家目录得问那台机器自己：远程的 HOME 往往不是本地那个。问过一次就记住。
     let homeDir = home();
     if (on) {
-      const r = await exec("sh", ["-c", "exec printf %s \"$HOME\""], { on }).catch(() => null);
-      if (r?.code !== 0 || !r?.stdout.trim()) {
-        this.note = `连不上 ${on}，读不到它上面的 .brain`;
-        return null;
+      const known = (this.remoteHome ?? {})[on];
+      if (known) {
+        homeDir = known;
+      } else {
+        const r = await exec("sh", ["-c", "exec printf %s \"$HOME\""], { on }).catch(() => null);
+        if (r?.code !== 0 || !r?.stdout.trim()) {
+          this.note = `连不上 ${on}，读不到它上面的 .brain`;
+          return null;
+        }
+        homeDir = r.stdout.trim();
+        (this.remoteHome ??= {})[on] = homeDir;
       }
-      homeDir = r.stdout.trim();
     }
     const homeBrain = `${homeDir}/.brain`;
     const text = await readTextFile(`${homeBrain}/todo.md`, { on }).catch(() => null);
