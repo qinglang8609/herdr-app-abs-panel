@@ -21,8 +21,8 @@ function agentMap() {
 }
 const appsOf = (w, map) => (map ?? agentMap()).get(w.id) ?? [];
 
-// 名字只留前 8 个字母，多的收成省略号：侧栏窄，名字一长圆圈和行尾 git 就没地方站。
-const name8 = (n) => (n.length > 8 ? `${n.slice(0, 8)}\u2026` : n);
+// 名字只留前 10 个字母，多的收成省略号：侧栏窄，名字一长圆圈和行尾 git 就没地方站。
+const name10 = (n) => (n.length > 10 ? `${n.slice(0, 10)}\u2026` : n);
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -510,9 +510,9 @@ export default class Spaces extends View {
           .items_center()
           .when(Boolean(tree), el => el.pl(22).child(svg("mods/abs/icons/branch.svg").size(13).text_color(t.dim)))
           .when(!tree, el => el.child(svg(`mods/abs/icons/${spaceIcon(w.id)}.svg`).size(14).flex_none().text_color(t.muted)))
-          .child(div().min_w(0).max_w(110).flex_grow(0).flex_shrink(1).truncate().text_size(12.5).text_color(t.foreground).child(name8(w.name)))
+          .child(div().min_w(0).max_w(110).flex_grow(0).flex_shrink(1).truncate().text_size(12.5).text_color(t.foreground).child(name10(w.name)))
           // 圆圈紧跟在名字后面：名字盒子只占文字宽，不用 min_w 撑宽，否则短名字右边
-          // 会空一段、把圆圈推远。名字最多 8 个字母，行尾 git 分支另限 64。
+          // 会空一段、把圆圈推远。名字最多 10 个字母，行尾 git 分支另限 64。
           // 圆圈紧跟在名字后面：名字盒子只占文字宽，不用 min_w 撑宽，否则短名字右边
           // 会空一段、把圆圈推远。名字上限 110，行尾 git 分支另限 64；不够时两边一起收。
           .when(appsOf(w, am).length > 0, (el) => el.child(this.agentDots(t, appsOf(w, am))))
