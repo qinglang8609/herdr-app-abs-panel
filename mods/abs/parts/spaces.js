@@ -372,13 +372,14 @@ export default class Spaces extends View {
     const branch = same(raw) || raw === "master" || raw === "main" ? "" : raw;
     const where = branch;
     return h_flex()
-      .flex_none()
       .min_w(0)
+      .flex_grow(0)
+      .flex_shrink(20)
       .gap(5)
       .items_center()
       .text_size(11.5)
       .text_color(t.dim)
-      .when(Boolean(where), (el) => el.child(div().min_w(0).truncate().child(where)))
+      .when(Boolean(where), (el) => el.child(div().min_w(0).flex_shrink(8).truncate().child(where)))
       .when(g.ahead > 0, (el) => el.child(div().flex_none().text_color(t.ansi2).child(`\u2191${g.ahead}`)))
       .when(g.behind > 0, (el) => el.child(div().flex_none().text_color(t.ansi1).child(`\u2193${g.behind}`)));
   }
@@ -396,14 +397,20 @@ export default class Spaces extends View {
     const n = Math.min(list.length, 4);
     const wpx = 18 + (n - 1) * 10;
     const items = list.slice(0, 4);
+    // 转圈单独一层，整体压在圆圈图标之下：弧的圆内部分被圆圈本身盖住，只露出圆外
+    // 那一圈。这样不管哪个 agent 在工作，弧都不会盖到别的图标上面。
+    const spins = items.map((a, i) => a.status === "working"
+      ? svg("mods/abs/icons/ring-spin.svg").size(22).absolute().top(-2).left(i * 10 - 2)
+          .text_color(t.working).spin(900)
+      : null).filter(Boolean);
     return div().relative().flex_none().flex_shrink(0).h(18).w(wpx)
       .children(items.map((a, i) => {
         const prog = a.program;
         const name = a.app || "agent";
         const st = a.status;
-        // 边框颜色表示状态；working 用 spinner 替掉边框。
+        // 边框颜色表示状态；working 的那道转圈在下面单独一层画。
         const ring = st === "blocked" ? t.blocked : st === "done" ? t.done ?? t.ansi4 : t.border;
-        const dot = div()
+        return div()
           .absolute().top(0).left(i * 10)
           .size(18).flex_none().rounded(9).flex().items_center().justify_center()
           .bg(prog?.tile ?? t.raised)
@@ -413,13 +420,8 @@ export default class Spaces extends View {
             ? (prog.tint ? svg(prog.icon).size(12).flex_none().text_color(prog.color ?? t.foreground)
                          : image(prog.icon).w(12).h(12).flex_none())
             : div().text_size(9).text_color(t.foreground).child(name.slice(0, 1)));
-        // working：圈子外圈套一道转动的弧。svg 必须直接做子元素 —— 套一层容器后
-        // spin 不再驱动它，只画出静止的弧。
-        return st === "working"
-          ? dot.child(svg("mods/abs/icons/ring-spin.svg").size(22).absolute().top(-2).left(-2)
-              .text_color(t.working).spin(900))
-          : dot;
       }))
+      .children(spins)
       .when(list.length > 4, (el) => el.child(div().absolute().top(0).left(wpx + 2).text_size(10).text_color(t.dim).child(`+${list.length - 4}`)));
   }
 
@@ -474,11 +476,12 @@ export default class Spaces extends View {
           .items_center()
           .when(Boolean(tree), el => el.pl(22).child(svg("mods/abs/icons/branch.svg").size(13).text_color(t.dim)))
           .when(!tree, el => el.child(svg(`mods/abs/icons/${spaceIcon(w.id)}.svg`).size(14).flex_none().text_color(t.muted)))
-          .child(div().flex_none().max_w(150).truncate().text_size(12.5).text_color(t.foreground).child(w.name))
-          // 图标紧跟名字，中间不撑开；名字太长把位置占了，图标就自然被挤出去裁掉。
+          .child(div().min_w(0).max_w(150).flex_grow(0).flex_shrink(1).truncate().text_size(12.5).text_color(t.foreground).child(w.name))
+          // 圆圈紧跟在名字后面：名字盒子只占文字宽，不用 min_w 撑宽，否则短名字右边
+          // 会空一段、把圆圈推远。宽度不够时先是行尾 git 分支/ahead 让位（shrink 20 倍）。
           .when(appsOf(w, am).length > 0, (el) => el.child(this.agentDots(t, appsOf(w, am))))
           .child(div().flex_1().min_w(0))
-          .when(Boolean(g), (el) => el.child(h_flex().flex_none().items_center().child(this.gitTail(g, tree, w.name, t)))),
+          .when(Boolean(g), (el) => el.child(h_flex().min_w(0).flex_grow(0).flex_shrink(20).items_center().child(this.gitTail(g, tree, w.name, t)))),
       );
   }
 
