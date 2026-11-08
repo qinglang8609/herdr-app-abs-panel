@@ -495,7 +495,12 @@ export default class Spaces extends View {
         this.pressed = null;
         this.over = null;
         if (from !== null && over === i && from !== i) run("space.move", { id: spaces()[from].id, index: i + 1 });
-        else if (from === i) run("space.select", { id: w.id });
+        else if (from === i) {
+          // 点了这一行就算看过它了：行上所有 agent 的「刚干完」蓝圈一起清掉，
+          // 不用非得点中那个小圆圈。
+          for (const a of appsOf(w, am)) this.fresh[a.address] = false;
+          run("space.select", { id: w.id });
+        }
         cx.notify();
       })
       .on_mouse_down("right", () => this.menu(w))
