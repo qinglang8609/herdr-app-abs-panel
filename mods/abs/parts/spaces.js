@@ -415,9 +415,10 @@ export default class Spaces extends View {
   }
 
   agentDots(t, list) {
-    const n = Math.min(list.length, 4);
+    const MOST = 6; // 一行最多画几个圆，多的折成 +N
+    const n = Math.min(list.length, MOST);
     const wpx = 18 + (n - 1) * 10;
-    const items = list.slice(0, 4);
+    const items = list.slice(0, MOST);
     // working 的动画做在描边上：圆圈里再放一层只画边框的层（inset 0，不出圆），
     // working 时让这一层自己的透明度来回脉动 —— 描边在动，又盖不到邻居的图标。
     return div().relative().flex_none().flex_shrink(0).h(18).w(wpx)
@@ -451,7 +452,7 @@ export default class Spaces extends View {
                          : image(prog.icon).w(12).h(12).flex_none())
             : div().text_size(9).text_color(t.foreground).child(name.slice(0, 1)));
       }))
-      .when(list.length > 4, (el) => el.child(div().absolute().top(0).left(wpx + 2).text_size(10).text_color(t.dim).child(`+${list.length - 4}`)));
+      .when(list.length > MOST, (el) => el.child(div().absolute().top(0).left(wpx + 2).text_size(10).text_color(t.dim).child(`+${list.length - MOST}`)));
   }
 
   row({ w, i, g, tree }, t) {
