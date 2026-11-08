@@ -416,9 +416,15 @@ export default class Spaces extends View {
 
   agentDots(t, list) {
     const n = Math.min(list.length, 4);
-    const wpx = 18 + (n - 1) * 18;
+    const wpx = 18 + (n - 1) * 10;
     const items = list.slice(0, 4);
-    // 圈之间留 18px（正好是圆的直径）：两个圆不再重叠，转圈的弧就不会落到旁边的圆上。
+    // 圆圈照旧叠着画（圆心距 10），省横向空间。转圈弧单独一层、画在所有圆圈之后，于是
+    // 落在圆圈下面；弧正好贴在圆外那一圈（半径 10.8、线宽 2.4 → 内缘 9.6，不与直径 18
+    // 的圆重叠，所以不会被自己的圆裁掉），轮到相邻圆的地盘时被相邻圆盖住。
+    const spins = items.map((a, i) => a.status === "working"
+      ? svg("mods/abs/icons/ring-spin.svg").size(24).absolute().top(-3).left(i * 10 - 3)
+          .text_color(t.working).spin(900)
+      : null).filter(Boolean);
     return div().relative().flex_none().flex_shrink(0).h(18).w(wpx)
       .children(items.map((a, i) => {
         const prog = a.program;
@@ -429,8 +435,8 @@ export default class Spaces extends View {
         const fresh = Boolean(this.fresh[a.address]);
         const flagged = st === "done" || fresh;
         const ring = st === "blocked" ? t.blocked : flagged ? t.done ?? t.ansi4 : t.border;
-        const dot = div()
-          .absolute().top(0).left(i * 18)
+        return div()
+          .absolute().top(0).left(i * 10)
           .size(18).flex_none().rounded(9).flex().items_center().justify_center()
           .bg(prog?.tile ?? t.raised)
           .border(st === "blocked" || flagged ? 1.5 : 1).border_color(ring)
@@ -446,12 +452,8 @@ export default class Spaces extends View {
             ? (prog.tint ? svg(prog.icon).size(12).flex_none().text_color(prog.color ?? t.foreground)
                          : image(prog.icon).w(12).h(12).flex_none())
             : div().text_size(9).text_color(t.foreground).child(name.slice(0, 1)));
-        // working：圆外圈套一道转动的弧。svg 必须直接做子元素 —— 套一层容器后 spin 不再驱动它。
-        return st === "working"
-          ? dot.child(svg("mods/abs/icons/ring-spin.svg").size(22).absolute().top(-2).left(-2)
-              .text_color(t.working).spin(900))
-          : dot;
       }))
+      .children(spins)
       .when(list.length > 4, (el) => el.child(div().absolute().top(0).left(wpx + 2).text_size(10).text_color(t.dim).child(`+${list.length - 4}`)));
   }
 
