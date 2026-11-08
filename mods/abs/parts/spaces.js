@@ -43,7 +43,7 @@ function place(s, ps) {
   return ps.find((p) => tabs.has(p.tab) && p.cwd)?.cwd || s.folder;
 }
 const rowHeight = ({ tree }) => (tree ? 28 : 30);
-const where = (s, ps) => JSON.stringify([s.machine ?? null, place(s, ps)]);
+const where = (s, ps, path) => JSON.stringify([s.machine ?? null, path ?? place(s, ps)]);
 const base = (path) => path.replace(/\/+$/, "").split("/").pop();
 // Changes made outside Herdr (an editor's save, a commit in another app): looked
 // for this often, in repos the list shows, while the window is in front.
@@ -116,10 +116,34 @@ export default class Spaces extends View {
   checkNew(cx) {
     const now = Date.now();
     const sp = spaces();
+    const ps = panes();
     for (const s of sp) if (!this.shown.has(s.id)) this.born[s.id] ??= now;
-    const due = this.due(now, sp, panes());
+    // 每 15 秒扫一次：已经不存在的空间 / agent / pane 留下的缓存条目没人再读，删掉，
+    // 否则它们只增不减（换个目录就多一条）。
+    if (now - (this.swept ?? 0) > 15000) {
+      this.swept = now;
+      this.sweep(sp, ps);
+    }
+    const due = this.due(now, sp, ps);
     if (due.size) this.refreshGit(due, cx);
     if (sp.some((s) => !this.shown.has(s.id))) cx.notify();
+  }
+
+  // 只留还活着的键。删掉 git 的条目只是让下次重查一遍，不丢数据。
+  sweep(sp, ps) {
+    const spaceIds = new Set(sp.map((s) => s.id));
+    const places = new Set(sp.map((s) => where(s, ps)));
+    const live = new Set((agents() ?? []).map((a) => a.address));
+    const paneIds = new Set(ps.map((p) => p.pane));
+    for (const id of Object.keys(this.born)) if (!spaceIds.has(id)) delete this.born[id];
+    for (const id of [...this.shown]) if (!spaceIds.has(id)) this.shown.delete(id);
+    for (const k of Object.keys(this.at)) if (!spaceIds.has(k)) delete this.at[k];
+    for (const k of Object.keys(this.git)) if (!places.has(k)) delete this.git[k];
+    for (const k of Object.keys(this.checked)) if (!places.has(k)) delete this.checked[k];
+    for (const k of [...this.unsure]) if (!places.has(k)) this.unsure.delete(k);
+    for (const k of Object.keys(this.wasStatus)) if (!live.has(k)) delete this.wasStatus[k];
+    for (const k of Object.keys(this.fresh)) if (!live.has(k)) delete this.fresh[k];
+    for (const k of Object.keys(this.busy)) if (!paneIds.has(k)) delete this.busy[k];
   }
 
   // Places whose git could have changed: new ones (a new space, a cd), where a
@@ -127,9 +151,15 @@ export default class Spaces extends View {
   // a machine that is back, and repos in view whose fallback is due.
   due(now, sp, ps) {
     // Moved there: what it knew of that place may be old.
+    // 这个函数每 250ms 跑一次：where 的键还是字符串（要做 Set 键），但不再为了取
+    // 第二个字段而 JSON.parse 一遍 —— place() 只算一次，顺手用。
     const at = {};
-    for (const s of sp) at[s.id] = where(s, ps);
-    const keys = new Set(Object.values(at).filter((k) => JSON.parse(k)[1]));
+    const keys = new Set();
+    for (const s of sp) {
+      const path = place(s, ps);
+      at[s.id] = where(s, ps, path);
+      if (path) keys.add(at[s.id]);
+    }
     const due = new Set([...keys].filter((k) => !(k in this.git)));
     for (const [id, k] of Object.entries(at)) if (this.at[id] && this.at[id] !== k && keys.has(k)) due.add(k);
     this.at = at;

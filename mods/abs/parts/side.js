@@ -116,6 +116,8 @@ export class Sidebar {
         if (JSON.stringify(before) !== JSON.stringify(d)) changed = true;
         this.diffs[key] = d;
       }
+      // 已经不在列表里的目录（空间关了、终端 cd 走了）就删掉，别让 diffs 一直长。
+      for (const key of Object.keys(this.diffs)) if (!folders.has(key)) delete this.diffs[key];
       this.refreshing = false;
       if (changed) cx.notify();
     });
