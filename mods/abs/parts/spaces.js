@@ -418,8 +418,8 @@ export default class Spaces extends View {
     const n = Math.min(list.length, 4);
     const wpx = 18 + (n - 1) * 10;
     const items = list.slice(0, 4);
-    // 圆圈叠着画（圆心距 10）。working 的动画做在图标本身（图标转）和边框颜色上，
-    // 不再另画浮动的弧，也就没有图层压到邻居的问题。
+    // working 的动画做在描边上：圆圈里再放一层只画边框的层（inset 0，不出圆），
+    // working 时让这一层自己的透明度来回脉动 —— 描边在动，又盖不到邻居的图标。
     return div().relative().flex_none().flex_shrink(0).h(18).w(wpx)
       .children(items.map((a, i) => {
         const prog = a.program;
@@ -429,16 +429,12 @@ export default class Spaces extends View {
         // core 的 done 一亮就被「看过」转成 idle，所以用 this.fresh 记住「刚干完还没看」。
         const fresh = Boolean(this.fresh[a.address]);
         const flagged = st === "done" || fresh;
+        const wide = st === "blocked" || flagged;
         const ring = st === "blocked" ? t.blocked : st === "working" ? t.working : flagged ? t.done ?? t.ansi4 : t.border;
-        const icon = prog?.icon
-          ? (prog.tint ? svg(prog.icon).size(12).flex_none().text_color(prog.color ?? t.foreground)
-                       : image(prog.icon).w(12).h(12).flex_none())
-          : div().text_size(9).text_color(t.foreground).child(name.slice(0, 1));
         return div()
           .absolute().top(0).left(i * 10)
           .size(18).flex_none().rounded(9).flex().items_center().justify_center()
           .bg(prog?.tile ?? t.raised)
-          .border(st === "blocked" || flagged ? 1.5 : 1).border_color(ring)
           .cursor_pointer()
           .on_click((_e, cx) => {
             cx.stop_propagation();
@@ -447,7 +443,13 @@ export default class Spaces extends View {
             cx.notify();
           })
           .tooltip(st ? `${name} · ${st}` : name)
-          .child(st === "working" ? icon.spin(900) : icon);
+          .child(div().absolute().inset(0).rounded(9)
+            .border(wide ? 1.5 : 1).border_color(ring)
+            .when(st === "working", (el) => el.loop("opacity", { from: 0.3, to: 1, period: 1100 })))
+          .child(prog?.icon
+            ? (prog.tint ? svg(prog.icon).size(12).flex_none().text_color(prog.color ?? t.foreground)
+                         : image(prog.icon).w(12).h(12).flex_none())
+            : div().text_size(9).text_color(t.foreground).child(name.slice(0, 1)));
       }))
       .when(list.length > 4, (el) => el.child(div().absolute().top(0).left(wpx + 2).text_size(10).text_color(t.dim).child(`+${list.length - 4}`)));
   }
