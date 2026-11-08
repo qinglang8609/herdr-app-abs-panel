@@ -35,8 +35,6 @@ sh install.sh
 │  abs        │                           │ │ 1/3 Next │ │
 │  fnos       │                           │ └──────────┘ │
 │   root      │                           │              │
-│ Agents      │                           │              │
-│  Working 1  │                           │              │
 └─────────────┴───────────────────────────┴──────────────┘
 ```
 
@@ -52,7 +50,7 @@ mods/abs/                 整套界面，一个模块
 │   ├── side.js           侧栏顶栏 + 三行导航
 │   ├── head.js           顶栏、打开菜单、页面图标
 │   ├── spaces.js         工作区列表（按服务器分组）
-│   ├── agents.js         Agents 运行状态
+│   ├── agents.js         Agents 运行状态（当前布局没挂载）
 │   ├── panel.js          右侧记忆库面板
 │   ├── space-icon.js     右键换工作区图标
 │   ├── foot.js           底部设置与主题
@@ -72,7 +70,6 @@ layouts/abs.json          布局
 | `side-top` | 侧栏顶栏（齿轮、折叠） |
 | `sidebar` | New thread / Search / Add machine |
 | `spaces` | 工作区列表 |
-| `agents` | 左下 Agents |
 | `header` | 顶栏 |
 | `panel` | 右侧记忆库面板 |
 

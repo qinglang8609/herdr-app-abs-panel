@@ -547,7 +547,17 @@ export default class Spaces extends View {
     if (changed) setShared("space.colors", kept);
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
       .child(h_flex().h(31).mt(10).pl(16).pr(10).items_center().justify_between().text_size(11.5).text_color(t.foreground)
-        .when(!collapsed, el => el.child("Spaces")))
+        .when(!collapsed, el => el.child("Spaces"))
+        // 侧栏收成 rail 后要有路回来：这个 » 原本长在 agents 模块里，那个模块已经去掉。
+        .when(collapsed, el => el.child(
+          div().id("spaces-unfold").text_size(13).text_color(t.dim).cursor_pointer()
+            .hover((s) => s.text_color(t.foreground))
+            .tooltip("Show sidebar")
+            .on_click(() => {
+              setShared("sidebar.collapsed", false);
+              run("layout.resize", { id: "sidebar", px: shared("sidebar.width") ?? 268 });
+            })
+            .child("\u00bb"))))
       .child(v_flex().flex_1().min_h(0).px(8).pb(14).overflow_y_scrollbar().mode("always")
         .on_mouse_up("left", (_e, cx) => { this.pressed = null; cx.notify(); })
         .children(this.grouped(t, collapsed)));
