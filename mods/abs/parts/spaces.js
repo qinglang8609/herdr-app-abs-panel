@@ -21,6 +21,9 @@ function agentMap() {
 }
 const appsOf = (w, map) => (map ?? agentMap()).get(w.id) ?? [];
 
+// 名字只留前 8 个字母，多的收成省略号：侧栏窄，名字一长圆圈和行尾 git 就没地方站。
+const name8 = (n) => (n.length > 8 ? `${n.slice(0, 8)}\u2026` : n);
+
 function find(node, id) {
   if (node?.id === id) return node;
   for (const child of node?.children ?? []) {
@@ -85,6 +88,8 @@ export default class Spaces extends View {
     // worktree appears under its repo instead of jumping there.
     this.shown = new Set(spaces().map((s) => s.id));
     this.born = {};
+    this.wasStatus = {}; // address -> 上一次见到的 status
+    this.fresh = {}; // address -> true：刚干完活、还没点开看（圆圈显蓝）
     this.pressed = null;
     this.over = null;
     this.machines = [];
@@ -100,6 +105,7 @@ export default class Spaces extends View {
     // 闲着时不打扰。spins 的动画自己走，不需要这里驱动。
     this.agentKey = this.agentStates();
     cx.timer.every(1000, (cx) => {
+      this.trackAgents();
       const now = this.agentStates();
       if (now === this.agentKey) return;
       this.agentKey = now;
@@ -374,12 +380,12 @@ export default class Spaces extends View {
     return h_flex()
       .min_w(0)
       .flex_grow(0)
-      .flex_shrink(20)
+      .flex_shrink(1)
       .gap(5)
       .items_center()
       .text_size(11.5)
       .text_color(t.dim)
-      .when(Boolean(where), (el) => el.child(div().min_w(0).flex_shrink(8).truncate().child(where)))
+      .when(Boolean(where), (el) => el.child(div().min_w(0).max_w(64).flex_shrink(8).truncate().child(where)))
       .when(g.ahead > 0, (el) => el.child(div().flex_none().text_color(t.ansi2).child(`\u2191${g.ahead}`)))
       .when(g.behind > 0, (el) => el.child(div().flex_none().text_color(t.ansi1).child(`\u2193${g.behind}`)));
   }
@@ -393,35 +399,59 @@ export default class Spaces extends View {
     return (agents() || []).map((a) => `${a.address}:${a.status}`).join(",");
   }
 
+  // core 的 done 一亮就被「看过」转成 idle，所以自己记住：干完活的 agent 留一个蓝圈
+  // 直到点开看。又开工（working/blocked）就清掉。
+  trackAgents() {
+    for (const a of agents() || []) {
+      const prev = this.wasStatus[a.address];
+      const st = a.status;
+      // 只在状态真的变了时动 fresh：core 会一直报 done，否则你点掉之后下一秒又亮回来。
+      if (st !== prev) {
+        if (st === "done" || (prev === "working" && st === "idle")) this.fresh[a.address] = true;
+        else if (st === "working" || st === "blocked") this.fresh[a.address] = false;
+      }
+      this.wasStatus[a.address] = st;
+    }
+  }
+
   agentDots(t, list) {
     const n = Math.min(list.length, 4);
-    const wpx = 18 + (n - 1) * 10;
+    const wpx = 18 + (n - 1) * 18;
     const items = list.slice(0, 4);
-    // 转圈单独一层，整体压在圆圈图标之下：弧的圆内部分被圆圈本身盖住，只露出圆外
-    // 那一圈。这样不管哪个 agent 在工作，弧都不会盖到别的图标上面。
-    const spins = items.map((a, i) => a.status === "working"
-      ? svg("mods/abs/icons/ring-spin.svg").size(22).absolute().top(-2).left(i * 10 - 2)
-          .text_color(t.working).spin(900)
-      : null).filter(Boolean);
+    // 圈之间留 18px（正好是圆的直径）：两个圆不再重叠，转圈的弧就不会落到旁边的圆上。
     return div().relative().flex_none().flex_shrink(0).h(18).w(wpx)
       .children(items.map((a, i) => {
         const prog = a.program;
         const name = a.app || "agent";
         const st = a.status;
-        // 边框颜色表示状态；working 的那道转圈在下面单独一层画。
-        const ring = st === "blocked" ? t.blocked : st === "done" ? t.done ?? t.ansi4 : t.border;
-        return div()
-          .absolute().top(0).left(i * 10)
+        // 边框颜色表示状态，和左侧 Agents 列表同一套：done 蓝、blocked 蓝、其余灰。
+        // core 的 done 一亮就被「看过」转成 idle，所以用 this.fresh 记住「刚干完还没看」。
+        const fresh = Boolean(this.fresh[a.address]);
+        const flagged = st === "done" || fresh;
+        const ring = st === "blocked" ? t.blocked : flagged ? t.done ?? t.ansi4 : t.border;
+        const dot = div()
+          .absolute().top(0).left(i * 18)
           .size(18).flex_none().rounded(9).flex().items_center().justify_center()
           .bg(prog?.tile ?? t.raised)
-          .border_1().border_color(ring)
+          .border(st === "blocked" || flagged ? 1.5 : 1).border_color(ring)
+          .cursor_pointer()
+          .on_click((_e, cx) => {
+            cx.stop_propagation();
+            this.fresh[a.address] = false;
+            run("pane.focus", { pane: a.pane });
+            cx.notify();
+          })
           .tooltip(st ? `${name} · ${st}` : name)
           .child(prog?.icon
             ? (prog.tint ? svg(prog.icon).size(12).flex_none().text_color(prog.color ?? t.foreground)
                          : image(prog.icon).w(12).h(12).flex_none())
             : div().text_size(9).text_color(t.foreground).child(name.slice(0, 1)));
+        // working：圆外圈套一道转动的弧。svg 必须直接做子元素 —— 套一层容器后 spin 不再驱动它。
+        return st === "working"
+          ? dot.child(svg("mods/abs/icons/ring-spin.svg").size(22).absolute().top(-2).left(-2)
+              .text_color(t.working).spin(900))
+          : dot;
       }))
-      .children(spins)
       .when(list.length > 4, (el) => el.child(div().absolute().top(0).left(wpx + 2).text_size(10).text_color(t.dim).child(`+${list.length - 4}`)));
   }
 
@@ -472,16 +502,18 @@ export default class Spaces extends View {
       .on_mouse_down("right", () => this.menu(w))
       .child(
         h_flex()
-          .gap(9)
+          .gap(6)
           .items_center()
           .when(Boolean(tree), el => el.pl(22).child(svg("mods/abs/icons/branch.svg").size(13).text_color(t.dim)))
           .when(!tree, el => el.child(svg(`mods/abs/icons/${spaceIcon(w.id)}.svg`).size(14).flex_none().text_color(t.muted)))
-          .child(div().min_w(0).max_w(150).flex_grow(0).flex_shrink(1).truncate().text_size(12.5).text_color(t.foreground).child(w.name))
+          .child(div().min_w(0).max_w(110).flex_grow(0).flex_shrink(1).truncate().text_size(12.5).text_color(t.foreground).child(name8(w.name)))
           // 圆圈紧跟在名字后面：名字盒子只占文字宽，不用 min_w 撑宽，否则短名字右边
-          // 会空一段、把圆圈推远。宽度不够时先是行尾 git 分支/ahead 让位（shrink 20 倍）。
+          // 会空一段、把圆圈推远。名字最多 8 个字母，行尾 git 分支另限 64。
+          // 圆圈紧跟在名字后面：名字盒子只占文字宽，不用 min_w 撑宽，否则短名字右边
+          // 会空一段、把圆圈推远。名字上限 110，行尾 git 分支另限 64；不够时两边一起收。
           .when(appsOf(w, am).length > 0, (el) => el.child(this.agentDots(t, appsOf(w, am))))
           .child(div().flex_1().min_w(0))
-          .when(Boolean(g), (el) => el.child(h_flex().min_w(0).flex_grow(0).flex_shrink(20).items_center().child(this.gitTail(g, tree, w.name, t)))),
+          .when(Boolean(g), (el) => el.child(h_flex().min_w(0).flex_grow(0).flex_shrink(1).items_center().child(this.gitTail(g, tree, w.name, t)))),
       );
   }
 
