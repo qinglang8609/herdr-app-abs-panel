@@ -449,10 +449,10 @@ export default class Spaces extends View {
     const n = Math.min(list.length, MOST);
     const wpx = 18 + (n - 1) * 10;
     const items = list.slice(0, MOST);
-    // working：圆外贴一道转动的弧（spin(900)）。弧单独一层、画在所有圆圈之后，
-    // 于是落在圆圈下面 —— 弧的圆内部分被自己的圆盖住，轮到相邻圆的地盘时被相邻圆
-    // 盖住，既不会盖住图标也不会被裁掉。ring-spin.svg 半径 10.8、线宽 2.4（内缘
-    // 9.6），正好贴在直径 18 的圆外面。
+    // working 的转圈弧：单独一层，而且排在所有圆圈**之前**。
+    // gpui 没有 z-index，层级只由先后顺序决定（后画的在上面）：弧排在前面，于是
+    // 每个圆圈都盖在弧上面 —— 弧永远盖不到任何图标，也不会被自己的圆裁掉（它本来
+    // 就在圆外面）。ring-spin.svg 半径 9.6、线宽 1.5 → 可见的那圈正好紧贴边框外沿。
     const spins = items
       .map((a, i) =>
         a.status === "working"
@@ -462,6 +462,7 @@ export default class Spaces extends View {
       )
       .filter(Boolean);
     return div().relative().flex_none().flex_shrink(0).h(18).w(wpx)
+      .children(spins)
       .children(items.map((a, i) => {
         const prog = a.program;
         const name = a.app || "agent";
@@ -474,7 +475,7 @@ export default class Spaces extends View {
         // working 不画橙边框 —— 由外面那道转圈弧表示在跑（原来就是这么分的），
         // 两个橙圈叠在一起会显得很粗。
         const ring = st === "blocked" ? t.blocked : flagged ? t.done ?? t.ansi4 : t.border;
-        return div()
+        const dot = div()
           .absolute().top(0).left(i * 10)
           .size(18).flex_none().rounded(9).flex().items_center().justify_center()
           .bg(prog?.tile ?? t.raised)
@@ -492,8 +493,8 @@ export default class Spaces extends View {
             ? (prog.tint ? svg(prog.icon).size(12).flex_none().text_color(prog.color ?? t.foreground)
                          : image(prog.icon).w(12).h(12).flex_none())
             : div().text_size(9).text_color(t.foreground).child(name.slice(0, 1)));
+        return dot;
       }))
-      .children(spins)
       .when(list.length > MOST, (el) => el.child(div().absolute().top(0).left(wpx + 2).text_size(10).text_color(t.dim).child(`+${list.length - MOST}`)));
   }
 
