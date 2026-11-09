@@ -449,8 +449,18 @@ export default class Spaces extends View {
     const n = Math.min(list.length, MOST);
     const wpx = 18 + (n - 1) * 10;
     const items = list.slice(0, MOST);
-    // working 的动画做在描边上：圆圈里再放一层只画边框的层（inset 0，不出圆），
-    // working 时让这一层自己的透明度来回脉动 —— 描边在动，又盖不到邻居的图标。
+    // working：圆外贴一道转动的弧（spin(900)）。弧单独一层、画在所有圆圈之后，
+    // 于是落在圆圈下面 —— 弧的圆内部分被自己的圆盖住，轮到相邻圆的地盘时被相邻圆
+    // 盖住，既不会盖住图标也不会被裁掉。ring-spin.svg 半径 10.8、线宽 2.4（内缘
+    // 9.6），正好贴在直径 18 的圆外面。
+    const spins = items
+      .map((a, i) =>
+        a.status === "working"
+          ? svg("mods/abs/icons/ring-spin.svg").size(24).absolute().top(-3).left(i * 10 - 3)
+              .text_color(t.working).spin(900)
+          : null,
+      )
+      .filter(Boolean);
     return div().relative().flex_none().flex_shrink(0).h(18).w(wpx)
       .children(items.map((a, i) => {
         const prog = a.program;
@@ -475,13 +485,13 @@ export default class Spaces extends View {
           })
           .tooltip(st ? `${name} · ${st}` : name)
           .child(div().absolute().inset(0).rounded(9)
-            .border(wide ? 1.5 : 1).border_color(ring)
-            .when(st === "working", (el) => el.loop("opacity", { from: 0.3, to: 1, period: 1100 })))
+            .border(wide ? 1.5 : 1).border_color(ring))
           .child(prog?.icon
             ? (prog.tint ? svg(prog.icon).size(12).flex_none().text_color(prog.color ?? t.foreground)
                          : image(prog.icon).w(12).h(12).flex_none())
             : div().text_size(9).text_color(t.foreground).child(name.slice(0, 1)));
       }))
+      .children(spins)
       .when(list.length > MOST, (el) => el.child(div().absolute().top(0).left(wpx + 2).text_size(10).text_color(t.dim).child(`+${list.length - MOST}`)));
   }
 
