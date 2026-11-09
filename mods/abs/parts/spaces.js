@@ -466,12 +466,14 @@ export default class Spaces extends View {
         const prog = a.program;
         const name = a.app || "agent";
         const st = a.status;
-        // 边框颜色表示状态，和左侧 Agents 列表同一套：working 橙、done 蓝、blocked 蓝、其余灰。
+        // 边框颜色表示状态，和左侧 Agents 列表同一套：done 蓝、blocked 蓝、其余灰。
         // core 的 done 一亮就被「看过」转成 idle，所以用 this.fresh 记住「刚干完还没看」。
         const fresh = Boolean(this.fresh[a.address]);
         const flagged = st === "done" || fresh;
         const wide = st === "blocked" || flagged;
-        const ring = st === "blocked" ? t.blocked : st === "working" ? t.working : flagged ? t.done ?? t.ansi4 : t.border;
+        // working 不画橙边框 —— 由外面那道转圈弧表示在跑（原来就是这么分的），
+        // 两个橙圈叠在一起会显得很粗。
+        const ring = st === "blocked" ? t.blocked : flagged ? t.done ?? t.ansi4 : t.border;
         return div()
           .absolute().top(0).left(i * 10)
           .size(18).flex_none().rounded(9).flex().items_center().justify_center()
