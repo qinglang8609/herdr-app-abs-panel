@@ -507,7 +507,8 @@ export default class AbsPanel extends View {
   // `fill`: 0 keeps the card as tall as its content; above 0 the card takes
   // that share of the free height and its own body scrolls instead.
   // `footer`: pinned under the scrolling body, so paging stays put.
-  card(title, badge, body, fill = 0, footer = null) {
+  // `gap`: the space between the cards in the body; 0 makes them one flat list.
+  card(title, badge, body, fill = 0, footer = null, gap = 6) {
     const t = theme();
     return v_flex().w_full().rounded(10).overflow_hidden().bg(t.background)
       .border_1().border_color(t.border)
@@ -518,8 +519,8 @@ export default class AbsPanel extends View {
         .child(div().flex_1()))
       .child(
         fill > 0
-          ? div().flex_1().min_h(0).overflow_y_scrollbar().child(v_flex().px(4).py(5).gap(6).w_full().children(body))
-          : v_flex().px(4).py(5).gap(6).children(body),
+          ? div().flex_1().min_h(0).overflow_y_scrollbar().child(v_flex().px(4).py(5).gap(gap).w_full().children(body))
+          : v_flex().px(4).py(5).gap(gap).children(body),
       )
       .when(footer != null, (e) => e.child(footer));
   }
@@ -664,7 +665,7 @@ export default class AbsPanel extends View {
       .trim();
     const detail = cleanNote && cleanNote !== task.title ? cleanNote : "";
     const kids = task.children ?? [];
-    return v_flex().w_full().flex_none().gap(3).px(7).py(6).rounded(7).bg(t.raised)
+    return v_flex().w_full().flex_none().gap(3).px(7).py(6).rounded(7)
       .cursor_pointer()
       .hover((s) => s.bg(t.chrome))
       .on_click(() => this.openDetail("task", task))
@@ -801,6 +802,7 @@ export default class AbsPanel extends View {
       ],
       fill,
       footer,
+      0, // 看板是一整条列表：卡片之间不留空隙
     );
   }
 
@@ -820,12 +822,15 @@ export default class AbsPanel extends View {
       `${(this.index.sections ?? []).reduce((n, s) => n + (s.items.length || s.stated || 0), 0)} 页`,
       [
         ...(sections.length ? sections.map((s) => h_flex().w_full().flex_none().gap(6).items_center().px(7).py(6).rounded(7)
-          .bg(t.raised).cursor_pointer().hover((el) => el.bg(t.chrome))
+          .cursor_pointer().hover((el) => el.bg(t.chrome))
           .on_click(() => this.openDetail("section", s))
           .child(div().size(7).flex_none().rounded(4).bg(t.ansi6))
           .child(div().flex_1().min_w(0).truncate().text_size(FS_ITEM).font_semibold().text_color(t.foreground).child(s.name))
           .child(div().text_size(FS_META).text_color(t.muted).child(`${s.items.length || s.stated || 0} 页`))) : [div().px(6).text_size(FS_BODY).text_color(t.dim).child("索引为空")]),
       ],
+      0,
+      null,
+      0,
     );
   }
 
@@ -845,7 +850,7 @@ export default class AbsPanel extends View {
       `${rules.length} 条`,
       [
         ...(shown.length ? shown.map((text, i) => h_flex().w_full().flex_none().gap(6).items_center().px(7).py(6).rounded(7)
-          .bg(t.raised).hover((el) => el.bg(t.chrome))
+          .hover((el) => el.bg(t.chrome))
           .child(div().text_size(FS_META).flex_none().text_color(t.ansi6).child(`${i + 1}`))
           .child(div().flex_1().min_w(0).text_size(FS_BODY).text_color(t.foreground).child(text))
           .when(editable, (e) => e.child(div().id(`abs-rule-del-${i}`).size(18).flex_none().flex().items_center().justify_center()
@@ -865,6 +870,9 @@ export default class AbsPanel extends View {
             .on_click(() => this.addRule()).child("+ 添加铁律")
           : div().px(6).text_size(FS_META).text_color(t.dim).child(this.brainOn ? `${this.brainOn} 上的文件改不了，只能看` : "没找到 index.md"),
       ],
+      0,
+      null,
+      0,
     );
   }
 
@@ -933,7 +941,6 @@ export default class AbsPanel extends View {
             .px(7)
             .py(6)
             .rounded(7)
-            .bg(t.raised)
             .cursor_pointer()
             .hover((el) => el.bg(t.chrome))
             .on_click(() => this.openDetail("entry", e))
@@ -988,7 +995,7 @@ export default class AbsPanel extends View {
       .child(div().text_size(FS_META).text_color(t.muted).child(`${page + 1} / ${pages}`))
       .child(btn("abs-log-next", "Next ›", page + 1, page < pages - 1));
 
-    return this.card("日志", all.length, body, fill, footer);
+    return this.card("日志", all.length, body, fill, footer, 0);
   }
 
   openIn(editor) {
@@ -1098,7 +1105,7 @@ export default class AbsPanel extends View {
       .child(div().text_size(FS_META).text_color(t.muted).child(`${page + 1} / ${pages}`))
       .child(btn("abs-sess-next", "Next ›", page + 1, page < pages - 1));
 
-    return [this.card(this.machine ? `pi 会话 · ${this.machine}` : "pi 会话", list.length, body, 1, footer)];
+    return [this.card(this.machine ? `pi 会话 · ${this.machine}` : "pi 会话", list.length, body, 1, footer, 0)];
   }
 
   sessTargets() {
@@ -1231,7 +1238,7 @@ export default class AbsPanel extends View {
       .pr(28)
       .py(7)
       .rounded(7)
-      .bg(arming ? t.ansi1 : t.raised)
+      .when(arming, (e) => e.bg(t.ansi1))
       .cursor_pointer()
       .hover((el) => el.bg(arming ? t.ansi1 : t.chrome))
       .on_hover((h, cx) => {
