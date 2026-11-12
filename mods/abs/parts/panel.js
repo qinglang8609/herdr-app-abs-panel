@@ -7,6 +7,9 @@ import { spaces, panes, focused, readTextFile, writeTextFile, watchFolder, exec,
 // ── 会话（pi 历史）───────────────────────
 
 const LIMIT = 200;
+// 一次扫描最多等多久。远程机器连不上时，exec 默认等 30 秒，
+// 面板就一直卡着不显示。现在超时就当失败，接着试下一个。
+const SCAN_TIMEOUT = 12000;
 
 // 字号：跟左侧栏（side.js / spaces.js 用 12 / 12.5 / 13）对齐，
 // 面板正文不再自留小一号。要统一调就改这五个值。
@@ -323,6 +326,8 @@ export default class AbsPanel extends View {
     this.nodeBin = null;
     // 扫描进行中标志，防止定时器和手动刷新叠跑。
     this.scanning = false;
+    // 扫描期间又被要求刷一次：跑完再补一轮，别把请求丢在 5 秒里。
+    this.scanAgain = false;
     this.note = null;
     this.watched = null;
     this.watchKey = null;
@@ -357,6 +362,8 @@ export default class AbsPanel extends View {
     if (key === this.watchKey) return;
     this.watchKey = key;
     this.refresh(cx);
+    // 换了工作区或机器，会话列表也要立刻重扫，不等下一个 5 秒表。
+    this.sessRefresh(cx);
   }
 
   // 只让「当前这一页」定时刷新。切走就停掉，切回来先立刻刷一次再重新起表。
@@ -1136,25 +1143,29 @@ export default class AbsPanel extends View {
   async sessScanOn(on) {
     if (on) {
       if (!this.scriptText) throw new Error("脚本还没读到");
-      const r = await exec("sh", ["-c", remoteScanCommand(this.scriptText, LIMIT)], { on });
+      const r = await exec("sh", ["-c", remoteScanCommand(this.scriptText, LIMIT)], { on, timeout: SCAN_TIMEOUT });
       if (r.code !== 0) throw new Error((r.stderr || r.stdout || "扫描失败").trim().slice(0, 160));
       return JSON.parse((r.stdout || "").trim() || "{}").sessions ?? [];
     }
     // 本机没装 node 就跳过，不算错误。探一次就够了，不用每轮都探。
     if (this.nodeBin === null) {
-      const probe = await exec("sh", ["-c", nodeProbeCommand()]);
+      const probe = await exec("sh", ["-c", nodeProbeCommand()], { timeout: 8000 });
       this.nodeBin = (probe.stdout || "").trim();
     }
     if (!this.nodeBin) return [];
     const path = this.scriptPath || this.scanScriptCandidates()[0];
-    const r = await exec(this.nodeBin, [path, "--limit", String(LIMIT)]);
+    const r = await exec(this.nodeBin, [path, "--limit", String(LIMIT)], { timeout: SCAN_TIMEOUT });
     if (r.code !== 0) throw new Error((r.stderr || r.stdout || "扫描失败").trim().slice(0, 160));
     return JSON.parse((r.stdout || "").trim() || "{}").sessions ?? [];
   }
 
   sessRefresh(cx) {
-    // 上一轮还没跑完就跳过。远程扫描要几秒，10 秒定时器很容易叠在一起。
-    if (this.scanning) return;
+    // 上一轮还没跑完就记一笔，等它跑完再补一轮。远程扫描要几秒，定时器和
+    // 切工作区很容易撞在一起；直接丢掉就是「切了要等下一个 5 秒」。
+    if (this.scanning) {
+      this.scanAgain = true;
+      return;
+    }
     this.scanning = true;
     const ticket = ++this.scanTicket;
     cx.spawn(async (cx) => {
@@ -1187,6 +1198,10 @@ export default class AbsPanel extends View {
         // 不管成没成都要放开，否则一次异常就永远不再扫了。
         this.scanning = false;
         cx.notify();
+        if (this.scanAgain) {
+          this.scanAgain = false;
+          this.sessRefresh(cx);
+        }
       }
     });
   }
