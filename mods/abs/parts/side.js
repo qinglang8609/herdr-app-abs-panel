@@ -89,8 +89,9 @@ export class Sidebar {
       cx.notify();
     });
     this.refresh(cx);
-    // Diffs every few seconds; ages twice a minute.
-    cx.timer.every(6000, (cx) => this.refresh(cx));
+    // 每个目录的 git diff 本机便宜、远程要 ssh：从 6 秒拉到 30 秒，
+    // 和 age 刷新对齐。本机的变化有 watchFolder 在 spaces.js 里兜底。
+    cx.timer.every(30000, (cx) => this.refresh(cx));
     cx.timer.every(30000, (cx) => cx.notify());
   }
 

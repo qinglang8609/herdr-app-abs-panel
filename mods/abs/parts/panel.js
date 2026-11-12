@@ -10,6 +10,12 @@ const LIMIT = 200;
 // 一次扫描最多等多久。远程机器连不上时，exec 默认等 30 秒，
 // 面板就一直卡着不显示。现在超时就当失败，接着试下一个。
 const SCAN_TIMEOUT = 12000;
+// 会话和 .brain 的轮询兜底。本机靠 watchFolder 立即刷新，只有远程机器
+// 和 watch 失效时才靠这个轮询，所以从 5 秒拉长到 30 秒，不再每 5 秒空转。
+const SESS_POLL_MS = 30000;
+const BRAIN_POLL_MS = 30000;
+// 扫到非空结果后，这么久内不再重扫同一台机器（切工作区会强制重扫）。
+const SESS_TTL_MS = 25000;
 
 // 字号：跟左侧栏（side.js / spaces.js 用 12 / 12.5 / 13）对齐，
 // 面板正文不再自留小一号。要统一调就改这五个值。
@@ -307,6 +313,12 @@ export default class AbsPanel extends View {
     this.scanning = false;
     // 扫描期间又被要求刷一次：跑完再补一轮，别把请求丢在 5 秒里。
     this.scanAgain = false;
+    // 每台机器扫到的会话，非空才缓存，别每轮都重扫同一台机器。
+    this.sessCache = {};
+    // 本机 sessions 目录的监听句柄（见 watchSessions）。
+    this.watchedSessions = null;
+    // 拼好的远程扫描命令，脚本不变就别每轮都重拼。
+    this.remoteCmd = null;
     this.note = null;
     this.watched = null;
     this.watchKey = null;
@@ -341,8 +353,8 @@ export default class AbsPanel extends View {
     if (key === this.watchKey) return;
     this.watchKey = key;
     this.refresh(cx);
-    // 换了工作区或机器，会话列表也要立刻重扫，不等下一个 5 秒表。
-    this.sessRefresh(cx);
+    // 换了工作区或机器，会话列表也要立刻重扫，不等下一个轮询。
+    this.sessRefresh(cx, true);
   }
 
   // 只让「当前这一页」定时刷新。切走就停掉，切回来先立刻刷一次再重新起表。
@@ -359,15 +371,16 @@ export default class AbsPanel extends View {
     }
     this.stops = [];
 
-    // 先刷一次，再起 5 秒表。
+    // 先刷一次，再起轮询表。本机靠 watchFolder 立即刷新，这个表只兜底。
     this.refresh(cx);
     if (view === "sessions") this.sessRefresh(cx);
 
     const stops = [];
     if (view === "sessions") {
-      stops.push(cx.timer.every(5000, (cx) => this.sessRefresh(cx)));
+      stops.push(cx.timer.every(SESS_POLL_MS, (cx) => this.sessRefresh(cx)));
+      this.watchSessions(cx);
     } else {
-      stops.push(cx.timer.every(5000, (cx) => this.refresh(cx)));
+      stops.push(cx.timer.every(BRAIN_POLL_MS, (cx) => this.refresh(cx)));
     }
     this.stops = stops.filter(Boolean);
   }
@@ -411,7 +424,11 @@ export default class AbsPanel extends View {
         if (text != null) {
           if (file === "index.md") this.index = parseIndex(text);
           else if (file === "log.md") this.log = parseLog(text);
-          else this.todo = parseTodo(text);
+          else {
+            this.todo = parseTodo(text);
+            // 双链日志的任务跟着 todo 走：读到了就在这里触发，不在 render 里。
+            this.loadLinked(this.todo, cx);
+          }
           this.note = null;
           this.noteKind = null;
         }
@@ -498,6 +515,31 @@ export default class AbsPanel extends View {
     });
   }
 
+  // 本机 pi 会话目录一变就重扫本机，不用等 30 秒轮询。远程机器没这能力。
+  watchSessions(cx) {
+    const dir = `${home()}/.pi/agent/sessions`;
+    if (this.watchedSessions === dir) return;
+    this.watchedSessions = dir;
+    cx.spawn(async (cx) => {
+      while (this.watchedSessions === dir) {
+        let failed = false;
+        try {
+          await watchFolder(dir);
+        } catch {
+          failed = true;
+        }
+        if (this.watchedSessions !== dir) return;
+        if (!failed) {
+          // 本机会话变了：清本机缓存；当前正看本机就立即重扫。
+          delete this.sessCache["__local__"];
+          if (this.sessOn() === null) this.sessRefresh(cx, true);
+          cx.notify();
+        }
+        if (failed) await new Promise((resolve) => cx.timer.after(10000, resolve));
+      }
+    });
+  }
+
   // ── 卡片 ───────────────────────────────
 
   // `fill`: the card takes the height it is given and its own body scrolls,
@@ -549,7 +591,7 @@ export default class AbsPanel extends View {
   // 平铺进「已完成」，不再只占一行「完成任务 N 条」。
   // 看板里的 `[[log-YYYY-MM-DD]]` 双链：并发读每一份 sessions/<id>.md，解析成任务。
   // 结果按 todo 的链接列表缓存，链接没变就不再读；正在读时也不再起一轮。
-  async loadLinked(todo) {
+  async loadLinked(todo, cx) {
     const links = [...(todo.doing ?? []), ...(todo.done ?? [])]
       .map((x) => x?.id)
       .filter((id) => id && String(id).startsWith("log-"));
@@ -582,7 +624,7 @@ export default class AbsPanel extends View {
     }
     this.linkedFor = key;
     this.linkedTasks = out;
-    this.lastCx?.notify?.();
+    cx?.notify?.();
   }
 
   // 双链 `[[log-YYYY-MM-DD]]` 指向 .brain/sessions/<id>.md：把里面的任务读出来，
@@ -748,9 +790,6 @@ export default class AbsPanel extends View {
     // 「完成任务 N 条」这类双链行换成它指向的真实任务：去掉链接行，换成 sessions 里读到的。
     const done = (this.todo.done ?? []).filter((x) => !String(x?.id ?? "").startsWith("log-"));
     const linked = this.linkedTasks ?? [];
-    // 异步读，读到后自己 notify；这里不等它，渲染不被它拖住。
-    void this.loadLinked(this.todo ?? {});
-
     const all = [...done, ...linked];
     const PER = 20;
     const pages = Math.max(1, Math.ceil(all.length / PER));
@@ -1119,10 +1158,18 @@ export default class AbsPanel extends View {
     return out;
   }
 
+  // 拼好的远程扫描命令：脚本不变就别每轮都重拼 3.7KB 字符串。
+  remoteCmdFor() {
+    if (this.remoteCmd?.script === this.scriptText) return this.remoteCmd.cmd;
+    const cmd = remoteScanCommand(this.scriptText, LIMIT);
+    this.remoteCmd = { script: this.scriptText, cmd };
+    return cmd;
+  }
+
   async sessScanOn(on) {
     if (on) {
       if (!this.scriptText) throw new Error("脚本还没读到");
-      const r = await exec("sh", ["-c", remoteScanCommand(this.scriptText, LIMIT)], { on, timeout: SCAN_TIMEOUT });
+      const r = await exec("sh", ["-c", this.remoteCmdFor()], { on, timeout: SCAN_TIMEOUT });
       if (r.code !== 0) throw new Error((r.stderr || r.stdout || "扫描失败").trim().slice(0, 160));
       return JSON.parse((r.stdout || "").trim() || "{}").sessions ?? [];
     }
@@ -1138,9 +1185,9 @@ export default class AbsPanel extends View {
     return JSON.parse((r.stdout || "").trim() || "{}").sessions ?? [];
   }
 
-  sessRefresh(cx) {
+  sessRefresh(cx, force = false) {
     // 上一轮还没跑完就记一笔，等它跑完再补一轮。远程扫描要几秒，定时器和
-    // 切工作区很容易撞在一起；直接丢掉就是「切了要等下一个 5 秒」。
+    // 切工作区很容易撞在一起；直接丢掉就是「切了要等下一个轮询」。
     if (this.scanning) {
       this.scanAgain = true;
       return;
@@ -1152,9 +1199,17 @@ export default class AbsPanel extends View {
       let got = null;
       try {
         for (const t of this.sessTargets()) {
+          const key = t.on ?? "__local__";
+          const hit = this.sessCache[key];
+          // 非空缓存没过期就直接用，别每轮都重扫同一台机器。
+          if (!force && hit?.list?.length && Date.now() - hit.at < SESS_TTL_MS) {
+            got = { on: t.on, list: hit.list };
+            break;
+          }
           try {
             const list = await this.sessScanOn(t.on);
             if (list.length) {
+              this.sessCache[key] = { list, at: Date.now() };
               got = { on: t.on, list };
               break;
             }
@@ -1222,8 +1277,9 @@ export default class AbsPanel extends View {
     const safe = String(s.file).replace(/'/g, "'\\''");
     const done = (msg) => {
       // 先把结果记下来再刷新，否则 sessRefresh 会把错误覆盖掉。
+      // 刚删了文件，强制重扫，别拿缓存里还带着被删会话的旧列表。
       if (msg) this.error = msg;
-      this.sessRefresh(cx);
+      this.sessRefresh(cx, true);
     };
     exec("sh", ["-c", `rm -f -- '${safe}'`], on ? { on } : undefined)
       .then(() => done(null))

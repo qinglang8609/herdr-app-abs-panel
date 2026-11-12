@@ -172,15 +172,18 @@ export default class Spaces extends View {
       if (this.busy[p.pane] && !busy[p.pane]) this.sameRepo(at[spaceOf[p.tab].id], keys).forEach((k) => due.add(k));
     }
     this.busy = busy;
+    // 每个 key 的机器名只解析一次：下面两处循环每 250ms 都跑，别反复 JSON.parse。
+    const machineAt = {};
+    for (const k of keys) machineAt[k] = JSON.parse(k)[0];
     for (const m of machines()) {
       const ready = m.layout === "ready";
-      if (ready && this.ready[m.name] === false) for (const k of keys) if (JSON.parse(k)[0] === m.name) due.add(k);
+      if (ready && this.ready[m.name] === false) for (const k of keys) if (machineAt[k] === m.name) due.add(k);
       this.ready[m.name] = ready;
     }
     if (window().active) {
       for (const k of keys) {
         const asks = this.git[k] || this.unsure.has(k);
-        if (asks && !this.folded.has(JSON.parse(k)[0]) && now - (this.checked[k] ?? 0) > FALLBACK) due.add(k);
+        if (asks && !this.folded.has(machineAt[k]) && now - (this.checked[k] ?? 0) > FALLBACK) due.add(k);
       }
     }
     return due;
