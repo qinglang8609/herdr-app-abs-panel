@@ -41,39 +41,6 @@ function sizeText(bytes) {
 }
 
 // 自带 UTF-8 + base64：这套运行时没有 TextEncoder / btoa。
-function utf8Bytes(str) {
-  const out = [];
-  for (let i = 0; i < str.length; i++) {
-    let c = str.charCodeAt(i);
-    if (c >= 0xd800 && c <= 0xdbff && i + 1 < str.length) {
-      const d = str.charCodeAt(i + 1);
-      if (d >= 0xdc00 && d <= 0xdfff) {
-        c = 0x10000 + ((c - 0xd800) << 10) + (d - 0xdc00);
-        i++;
-      }
-    }
-    if (c < 0x80) out.push(c);
-    else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63));
-    else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
-    else out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
-  }
-  return out;
-}
-
-function toBase64(str) {
-  const bytes = utf8Bytes(String(str));
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  let out = "";
-  for (let i = 0; i < bytes.length; i += 3) {
-    const a = bytes[i], b = bytes[i + 1], c = bytes[i + 2];
-    out += chars[a >> 2];
-    out += chars[((a & 3) << 4) | ((b ?? 0) >> 4)];
-    out += b === undefined ? "=" : chars[((b & 15) << 2) | ((c ?? 0) >> 6)];
-    out += c === undefined ? "=" : chars[c & 63];
-  }
-  return out;
-}
-
 // node 在哪：从 Finder 启动的 Herdr 只有系统 PATH（/usr/bin:/bin:/usr/sbin:/sbin），
 // 从终端启动才带 nvm/homebrew 的路径。所以先问 PATH，再按常见安装位置兜一遍。
 function nodeSh() {
@@ -85,10 +52,22 @@ function nodeProbeCommand() {
 }
 
 function remoteScanCommand(scriptText, limit) {
-  const b64 = toBase64(String(scriptText));
-  // macOS 的 mktemp 只认结尾的 X：`/tmp/scan-XXXXXX.js` 会报 mkstemp failed，
-  // 所以先拿不带扩展名的临时名，再补 .js。
-  return `${nodeSh()}; [ -n "$n" ] || { echo '没找到 node' >&2; exit 127; }; tmp=$(mktemp "\${TMPDIR:-/tmp}/scan.XXXXXX") || exit 1; tmp="$tmp.js"; trap 'rm -f "$tmp"' EXIT; printf %s '${b64}' | base64 -d > "$tmp" || exit 1; "$n" "$tmp" --limit ${limit}`;
+  // 把脚本原样从 stdin 喂给 node：不写临时文件，不用 base64。
+  // 以前用 base64 + mktemp，在部分机器上 sh 会报
+  //   /usr/bin/base64: Operation not permitted
+  // 同一条命令在别的机器上又正常，干脆不走这条路。
+  // 定界符加引号，里面的 $ 和反引号不会被 shell 展开。
+  const text = String(scriptText).replace(/\r\n/g, "\n").replace(/\n+$/, "");
+  let tag = "__ABS_SCAN_EOF__";
+  while (text.includes(tag)) tag += "_";
+  return [
+    `h=$(uname -n 2>/dev/null)`,
+    nodeSh(),
+    `[ -n "$n" ] || { echo "没找到 node：$h" >&2; exit 127; }`,
+    `"$n" - --limit ${limit} <<'${tag}'`,
+    text,
+    tag,
+  ].join("\n");
 }
 
 // ── 解析 ─────────────────────────────────
