@@ -71,9 +71,21 @@ function toBase64(str) {
   return out;
 }
 
+// node 在哪：从 Finder 启动的 Herdr 只有系统 PATH（/usr/bin:/bin:/usr/sbin:/sbin），
+// 从终端启动才带 nvm/homebrew 的路径。所以先问 PATH，再按常见安装位置兜一遍。
+function nodeSh() {
+  return `n=$(command -v node 2>/dev/null); if [ -z "$n" ]; then for c in /opt/homebrew/bin/node /usr/local/bin/node "$HOME"/.nvm/versions/node/*/bin/node; do [ -x "$c" ] && n="$c" && break; done; fi`;
+}
+
+function nodeProbeCommand() {
+  return `${nodeSh()}; [ -n "$n" ] && printf '%s' "$n"`;
+}
+
 function remoteScanCommand(scriptText, limit) {
   const b64 = toBase64(String(scriptText));
-  return `tmp=$(mktemp /tmp/scan-XXXXXX.js); printf %s '${b64}' | base64 -d > "$tmp" 2>/dev/null; node "$tmp" --limit ${limit}; rc=$?; rm -f "$tmp"; exit $rc`;
+  // macOS 的 mktemp 只认结尾的 X：`/tmp/scan-XXXXXX.js` 会报 mkstemp failed，
+  // 所以先拿不带扩展名的临时名，再补 .js。
+  return `${nodeSh()}; [ -n "$n" ] || { echo '没找到 node' >&2; exit 127; }; tmp=$(mktemp "\${TMPDIR:-/tmp}/scan.XXXXXX") || exit 1; tmp="$tmp.js"; trap 'rm -f "$tmp"' EXIT; printf %s '${b64}' | base64 -d > "$tmp" || exit 1; "$n" "$tmp" --limit ${limit}`;
 }
 
 // ── 解析 ─────────────────────────────────
@@ -307,8 +319,8 @@ export default class AbsPanel extends View {
     this.error = null;
     // 扫描票号：定时器和手动刷新同时触发时，只认最新一轮。
     this.scanTicket = 0;
-    // 本机有没有 node，探一次就够了。
-    this.hasNode = null;
+    // 本机的 node 绝对路径，探一次就够了。
+    this.nodeBin = null;
     // 扫描进行中标志，防止定时器和手动刷新叠跑。
     this.scanning = false;
     this.note = null;
@@ -1129,13 +1141,13 @@ export default class AbsPanel extends View {
       return JSON.parse((r.stdout || "").trim() || "{}").sessions ?? [];
     }
     // 本机没装 node 就跳过，不算错误。探一次就够了，不用每轮都探。
-    if (this.hasNode === null) {
-      const probe = await exec("sh", ["-c", "command -v node >/dev/null 2>&1 && echo ok || echo missing"]);
-      this.hasNode = (probe.stdout || "").trim() === "ok";
+    if (this.nodeBin === null) {
+      const probe = await exec("sh", ["-c", nodeProbeCommand()]);
+      this.nodeBin = (probe.stdout || "").trim();
     }
-    if (!this.hasNode) return [];
+    if (!this.nodeBin) return [];
     const path = this.scriptPath || this.scanScriptCandidates()[0];
-    const r = await exec("node", [path, "--limit", String(LIMIT)]);
+    const r = await exec(this.nodeBin, [path, "--limit", String(LIMIT)]);
     if (r.code !== 0) throw new Error((r.stderr || r.stdout || "扫描失败").trim().slice(0, 160));
     return JSON.parse((r.stdout || "").trim() || "{}").sessions ?? [];
   }
@@ -1164,7 +1176,13 @@ export default class AbsPanel extends View {
         this.sessions = got?.list ?? [];
         this.machine = got?.on ?? null;
         // 扫到东西就不报错；一条都没扫到才把原因说出来。
-        this.error = got ? null : errors.join("；") || null;
+        // 扫到的不是当前机器，说明当前机器那轮出错了，把原因一起带上，
+        // 否则界面只显示别的机器的会话，看不出为什么。
+        const want = this.sessOn();
+        const fell = !!got && (got.on ?? null) !== (want ?? null);
+        this.error = got
+          ? (fell && errors.length ? `${want ?? "这台机器"}没扫成：${errors[0]}` : null)
+          : errors.join("；") || null;
       } finally {
         // 不管成没成都要放开，否则一次异常就永远不再扫了。
         this.scanning = false;
