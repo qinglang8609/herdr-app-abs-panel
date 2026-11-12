@@ -5,20 +5,13 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { run, props, closeOverlay, openOverlay, theme, keys, terminals, spaces, panes, exec } from "herdr";
+import { run, props, closeOverlay, openOverlay, theme, keys, terminals, spaces, panes } from "herdr";
+import { checkout } from "./lib.js";
 
 // Where a space is now: its first terminal's live folder, else where it was made.
 function place(s) {
   const tabs = new Set((s.tabs ?? []).map((c) => c.id));
   return panes().find((p) => tabs.has(p.tab) && p.cwd)?.cwd || s.folder;
-}
-
-// A space's checkout: "main" (a repo's own), "linked" (a worktree), or null.
-async function checkout(folder, on) {
-  const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd: folder, on });
-  const common = await exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: folder, on });
-  if (top.code !== 0 || common.code !== 0) return null;
-  return common.stdout.trim() === `${top.stdout.trim()}/.git` ? "main" : "linked";
 }
 
 function items(p, git) {
@@ -58,7 +51,7 @@ function items(p, git) {
         ["Change icon", "space.icon", { id: tg.id }],
         ["Rename", "space.rename", { id: tg.id }],
         ...(git ? [["New worktree", "worktree", { space: tg.id, action: "new" }], ["Open worktree", "worktree", { space: tg.id, action: "open" }]] : []),
-        ...(git === "linked" ? [["Remove worktree", "worktree", { space: tg.id, action: "remove" }]] : []),
+        ...(git === "worktree" ? [["Remove worktree", "worktree", { space: tg.id, action: "remove" }]] : []),
         ["Close", "space.close", { id: tg.id }],
       ];
     default:
