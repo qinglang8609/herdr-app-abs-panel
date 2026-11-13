@@ -686,12 +686,12 @@ export default class Ports extends View {
           )),
       ))
       .when(!this.form, (e) => e.child(
-        h_flex().px(9).pb(8).pt(4).flex_none()
-          .child(h_flex().h(28).px(10).items_center().gap(5).rounded(7).cursor_pointer()
-            .text_size(11.5).text_color(t.dim).border_1().border_color(t.border)
+        h_flex().px(9).pb(8).pt(4).flex_none().justify_center()
+          .child(h_flex().w(28).h(28).items_center().justify_center().rounded(7).cursor_pointer()
+            .text_color(t.dim).border_1().border_color(t.border)
             .hover((s) => s.bg(t.chrome).text_color(t.foreground))
             .on_click((_e, cx) => { this.openForm("add"); cx.notify(); })
-            .child(svg(icon("plus")).size(12)).child("新增转发")),
+            .child(svg(icon("plus")).size(14))),
       ));
   }
 }
