@@ -152,6 +152,7 @@ export class Header {
     const mac = w.platform === "macos" && !w.fullscreen;
     const editor = editors(w.platform, dir ?? "").find((e) => e[0] === shared("studio.editor")) ?? editors(w.platform, dir ?? "")[0];
     const reviewOpen = isShown("review");
+    const portsActive = reviewOpen && (shared("abs.view") ?? "sessions") === "ports";
 
     return h_flex()
       .size_full()
@@ -232,6 +233,22 @@ export class Header {
           { framed: false, tip: "Open" },
         ),
       )
+      // 端口转发：只在当前是远程项目（on 非空）时显示，点开是右侧面板的 ports 页。
+      .when(Boolean(on), (el) => el.child(
+        button(
+          t,
+          "sh-ports",
+          [svg(icon("server")).size(15)],
+          () => {
+            if (portsActive) run("layout.hide", { id: "review" });
+            else {
+              setShared("abs.view", "ports");
+              if (!reviewOpen) run("layout.show", { id: "review" });
+            }
+          },
+          { framed: false, on: portsActive, hoverBg: false, tip: portsActive ? "收起端口转发" : "端口转发" },
+        ),
+      ))
       .children(
         [
           ["sessions", "session", "会话"],

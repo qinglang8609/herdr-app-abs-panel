@@ -3,6 +3,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { spaces, panes, focused, readTextFile, writeTextFile, watchFolder, exec, hc, theme, home, run, appHome, openOverlay, nextCommand, shared } from "herdr";
+import Ports from "./ports.js";
 
 // ── 会话（pi 历史）───────────────────────
 
@@ -322,6 +323,9 @@ export default class AbsPanel extends View {
     this.note = null;
     this.watched = null;
     this.watchKey = null;
+    // 端口转发页（独立视图，数据不读 .brain）。
+    this.ports = new Ports();
+    this.ports.init(null, cx);
     this.refresh(cx);
     this.loadScript(cx);
     this.sessRefresh(cx);
@@ -370,6 +374,13 @@ export default class AbsPanel extends View {
       } catch {}
     }
     this.stops = [];
+
+    // 端口页不读 .brain，走自己的刷新（读 ssh config + 探测端口）。
+    if (view === "ports") {
+      this.ports.refresh(cx);
+      this.stops = [cx.timer.every(4000, (cx) => { if (!this.ports.form) this.ports.refresh(cx); })].filter(Boolean);
+      return;
+    }
 
     // 先刷一次，再起轮询表。本机靠 watchFolder 立即刷新，这个表只兜底。
     this.refresh(cx);
@@ -1358,14 +1369,15 @@ export default class AbsPanel extends View {
     const view = shared("abs.view") ?? this.view;
     // 只为当前这一页起刷新表。
     this.syncTimers(cx);
-    // 会话页和看板页的卡片自己滚，外层不再滚。
-    const fillsPanel = view === "sessions" || view === "board" || view === "log";
+    // 会话页、看板页、日志页、端口页的卡片自己滚，外层不再滚。
+    const fillsPanel = view === "sessions" || view === "board" || view === "log" || view === "ports";
     const body = view === "sessions" ? this.sessCards()
       // 看板：进行中、已完成、日志三张卡片，各自占一份高度、各自在里面滚。
       // 看板：任务卡片按内容高，剩下的高度全给日志。
       // 看板：一张卡片，里面分「进行中」和「已完成」，整张卡片一起滚。
       : view === "board" ? [this.boardCard(1)]
       : view === "index" ? [this.rulesCard(), this.indexCard()]
+      : view === "ports" ? [this.ports.render(cx)]
       : [this.logCard(1)];
     return v_flex().id("abs-panel").size_full().min_h(0).text_color(t.foreground).bg(t.background)
       .child(div().flex_1().min_h(0).p(0).when(fillsPanel, (e) => e.flex(), (e) => e.overflow_y_scrollbar()).child(v_flex().gap(10).w_full().when(fillsPanel, (x) => x.flex_1().min_h(0))
