@@ -357,6 +357,8 @@ export default class AbsPanel extends View {
     if (key === this.watchKey) return;
     this.watchKey = key;
     this.refresh(cx);
+    // 端口页按服务器取列表，换机器就得立刻跟着换；等 4 秒轮询会看着像卡住。
+    this.ports?.refresh(cx);
     // 换了工作区或机器，会话列表也要立刻重扫，不等下一个轮询。
     this.sessRefresh(cx, true);
   }

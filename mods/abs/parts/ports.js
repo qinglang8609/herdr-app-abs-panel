@@ -129,15 +129,36 @@ function discoverTunnels(terms) {
 
 // ---- 端口占用探测 ---------------------------------------------------------
 
-// 有人监听就返回 { command, pid }，否则 null。
+// 解析 lsof -nP -iTCP -sTCP:LISTEN 的输出 → Map<端口, { command, pid }>。
+// NAME 列形如 127.0.0.1:5173、*:8000、[::1]:5173。
+function parseListen(text) {
+  const map = new Map();
+  const lines = String(text ?? "").trim().split("\n");
+  for (const raw of lines.slice(1)) {
+    // lsof 开了 -sTCP:LISTEN 会在行尾多一段 "(LISTEN)"，先去掉再分列。
+    const cols = raw.replace(/\s*\(LISTEN\)\s*$/, "").trim().split(/\s+/);
+    if (cols.length < 3) continue;
+    const name = cols[cols.length - 1];
+    if (!/:\d+$/.test(name)) continue;
+    const port = name.slice(name.lastIndexOf(":") + 1);
+    if (map.has(port)) continue;
+    map.set(port, { command: cols[0], pid: cols[1] });
+  }
+  return map;
+}
+
+// 一次读出本机所有监听端口。refresh 里端口可能有十几个，一个端口跑一次 lsof
+// 就是十几次进程启动，切服务器要等好几秒。
+async function listenSnapshot() {
+  const r = await exec("lsof", ["-nP", "-iTCP", "-sTCP:LISTEN"]).catch(() => ({ code: 1, stdout: "" }));
+  return parseListen(r.stdout);
+}
+
+// 有人监听就返回 { command, pid }，否则 null。单个端口现查（waitFree 用）。
 async function portOwner(port) {
-  const r = await exec("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN"]).catch(() => ({ code: 1, stdout: "", stderr: "" }));
-  if (r.code !== 0 || !(r.stdout || "").trim()) return null;
-  const lines = (r.stdout || "").trim().split("\n");
-  const row = lines[1] || lines[0]; // 第一行是表头
-  const cols = row.split(/\s+/);
-  if (cols.length < 2) return null;
-  return { command: cols[0], pid: cols[1] };
+  const r = await exec("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN"]).catch(() => ({ code: 1, stdout: "" }));
+  for (const owner of parseListen(r.stdout).values()) return owner;
+  return null;
 }
 
 // 占用者描述：非 ssh 直接 "命令 (pid n)"；ssh 尽量找出它连的是哪台机器。
@@ -321,7 +342,12 @@ export default class Ports extends View {
     this.refreshAgain = false;
     cx.spawn(async (cx) => {
       try {
-        const configText = await readTextFile(SSH_CONFIG()).catch(() => null);
+        // 三件事并行：读 ssh config、读记录、一次读完全部监听端口。
+        const [configText, allTunnels, listen] = await Promise.all([
+          readTextFile(SSH_CONFIG()).catch(() => null),
+          readRecord(),
+          listenSnapshot(),
+        ]);
         const allConfigs = configText ? parseSshConfig(configText) : [];
         this.hosts = configText ? configHosts(configText) : [];
         // 按服务器取列表：同一台机器下的所有工作区内容相同，本机项目为空。
@@ -329,7 +355,6 @@ export default class Ports extends View {
         const aliases = server ? server.aliases.map((a) => a.toLowerCase()) : [];
         const sameServer = (name) => Boolean(server) && String(name ?? "").toLowerCase() === server.machine.toLowerCase();
         const configs = allConfigs.filter((c) => aliases.includes(c.host.toLowerCase()));
-        const allTunnels = await readRecord();
         const terms = terminals();
         // 回退：记录里没有但进程还在的隧道，按实际 ssh -N -L 认领回来（并补标签、
         // 写回记录），否则记录一丢、面板里就永远看不见这条还在跑的转发。
@@ -352,7 +377,7 @@ export default class Ports extends View {
         const owners = new Map();
         const descCache = new Map(); // pid -> 描述，同 pid 只 ps 一次
         for (const p of ports) {
-          const o = await portOwner(p);
+          const o = listen.get(String(p));
           if (!o) continue;
           if (!descCache.has(o.pid)) descCache.set(o.pid, await describeOwner(o));
           owners.set(p, { ...o, desc: descCache.get(o.pid) });
