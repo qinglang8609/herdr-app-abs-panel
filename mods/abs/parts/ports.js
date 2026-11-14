@@ -135,9 +135,11 @@ async function writeRecord(tunnels) {
 // ---- 隧道启动 / 停止 ------------------------------------------------------
 
 // 起一条 ssh -N -L，返回终端 address；失败返回 null。
+// 终端带上 abs.pf=<id> 标签：重启后地址会重新编号、可能被别的终端复用，
+// 只有标签能认出「这条进程是我们起的隧道」。
 async function startTunnel(host, localPort, remoteAddr, remotePort, id) {
   const name = `pf-${localPort}-${rand()}`;
-  const r = await hc(["run", "--json", "--bg", "--no-parent", "--name", name, "--",
+  const r = await hc(["run", "--json", "--bg", "--no-parent", "--name", name, "--label", `abs.pf=${id}`, "--",
     "ssh", "-N", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-o", "ConnectTimeout=10",
     "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4",
     "-L", `127.0.0.1:${localPort}:${remoteAddr}:${remotePort}`, host]).catch(() => ({ code: 1, stdout: "" }));
@@ -145,8 +147,21 @@ async function startTunnel(host, localPort, remoteAddr, remotePort, id) {
   try { return JSON.parse(r.stdout).address; } catch { return null; }
 }
 
-function stopTunnel(terminal) {
-  if (terminal) run("terminal.kill", { terminal });
+// 记录里的 address 是不是我们那条隧道。重启电脑后 herdr 会把地址从头编号，
+// 旧的 t8 很可能已经属于别人的 pane，光比地址会把别人的终端当成自己的。
+function isOurTerminal(term, id) {
+  if (!term) return false;
+  return (term.labels ?? {})["abs.pf"] === id;
+}
+
+// 只在「地址还在」且「确实是我们起的隧道」时才 kill。
+// 否则 core 会报 no terminal "t8"（弹通知），复用的地址还会误杀别人的 pane。
+function stopTunnel(terminal, id) {
+  if (!terminal) return false;
+  const term = terminals().find((t) => t.address === terminal);
+  if (!isOurTerminal(term, id)) return false;
+  run("terminal.kill", { terminal });
+  return true;
 }
 
 // 读隧道终端的输出（拿 ssh 的报错原文）。
@@ -226,11 +241,12 @@ export default class Ports extends View {
 
   // 打开时清掉记录里 terminal 已消失的项（herdr-core 重启后隧道没了，
   // 只剩死记录）。还在跑的隧道不碰，列表照常显示。
+  // 判活必须比标签：重启后地址重新编号，只看地址还在就把死记录当成活的。
   async cleanup() {
     const tunnels = await readRecord();
     if (!tunnels.length) return;
-    const alive = new Set(terminals().map((t) => t.address));
-    const kept = tunnels.filter((t) => alive.has(t.terminal));
+    const alive = new Map(terminals().map((t) => [t.address, t]));
+    const kept = tunnels.filter((t) => isOurTerminal(alive.get(t.terminal), t.id));
     if (kept.length !== tunnels.length) await writeRecord(kept);
   }
 
@@ -276,11 +292,12 @@ export default class Ports extends View {
         }
         for (const t of tunnels) {
           const term = byAddr.get(t.terminal);
+          const ours = isOurTerminal(term, t.id);
           const owner = owners.get(t.localPort);
-          const termLive = Boolean(term && term.state === "live");
+          const termLive = ours && term.state === "live";
           const running = termLive && Boolean(owner);
           const stopped = Boolean(t.stopped);
-          const dead = !term; // 终端消失（herdr-core 重启）
+          const dead = !ours; // 终端消失（herdr-core 重启，或地址被别的终端复用）
           const failed = termLive && !owner; // 进程在但端口没监听
           items.push({
             ...t,
@@ -378,7 +395,7 @@ export default class Ports extends View {
       await sleep(300);
     }
     const out = await readTunnel(terminal);
-    stopTunnel(terminal);
+    stopTunnel(terminal, id);
     throw new Error(out ? `启动失败：${out.split("\n")[0]}` : `端口 ${lp} 未监听`);
   }
 
@@ -395,7 +412,7 @@ export default class Ports extends View {
     if (same) return;
     const old = { terminal: item.terminal, running: item.running, host: item.host, localPort: item.localPort, remoteAddr: item.remoteAddr, remotePort: item.remotePort };
     // 旧隧道先停（改端口/主机要重起；本机端口没变时新隧道会因端口占用失败，所以一律先停）。
-    if (item.terminal) stopTunnel(item.terminal);
+    stopTunnel(item.terminal, item.id);
     if (!(await waitFree(lp))) throw new Error(`端口 ${lp} 仍被占用`);
     let terminal = null;
     try {
@@ -473,8 +490,8 @@ export default class Ports extends View {
   startItem(it, cx) {
     this.act(cx, async () => {
       // 旧进程（无论运行中还是残留）先停掉，等端口释放，避免重复起同端口。
-      if (it.source === "tunnel" && it.terminal) {
-        stopTunnel(it.terminal);
+      if (it.source === "tunnel") {
+        stopTunnel(it.terminal, it.id);
         await waitFree(it.localPort);
       }
       const id = it.source === "config" ? `pf-${rand()}` : it.id;
@@ -492,7 +509,7 @@ export default class Ports extends View {
 
   stopItem(it, cx) {
     this.act(cx, async () => {
-      stopTunnel(it.terminal);
+      stopTunnel(it.terminal, it.id);
       const tunnels = await readRecord();
       const x = tunnels.find((t) => t.id === it.id);
       if (x) { x.stopped = true; x.note = null; }
@@ -504,7 +521,7 @@ export default class Ports extends View {
     this.act(cx, async () => {
       if (it.source === "config") await this.doRemoveConfig(it);
       else {
-        stopTunnel(it.terminal);
+        stopTunnel(it.terminal, it.id);
         const tunnels = (await readRecord()).filter((t) => t.id !== it.id);
         await writeRecord(tunnels);
       }
