@@ -154,6 +154,16 @@ function isOurTerminal(term, id) {
   return (term.labels ?? {})["abs.pf"] === id;
 }
 
+// 升级前起的隧道没有 abs.pf 标签。地址还在、argv 又确实是 ssh -N -L 且本地端口
+// 对得上的，就认成自己那条（补标签），别把还在跑的隧道从面板里抹掉。
+function looksLikeTunnel(term, localPort) {
+  if (!term) return false;
+  const argv = term.argv ?? [];
+  if (!argv.some((a) => /(^|\/)ssh$/.test(a))) return false;
+  if (!argv.includes("-N")) return false;
+  return argv.some((a) => a.includes(`:${localPort}:`));
+}
+
 // 只在「地址还在」且「确实是我们起的隧道」时才 kill。
 // 否则 core 会报 no terminal "t8"（弹通知），复用的地址还会误杀别人的 pane。
 function stopTunnel(terminal, id) {
@@ -239,15 +249,25 @@ export default class Ports extends View {
     return hostFor(machine, this.hosts);
   }
 
-  // 打开时清掉记录里 terminal 已消失的项（herdr-core 重启后隧道没了，
-  // 只剩死记录）。还在跑的隧道不碰，列表照常显示。
+  // 打开时核对记录与现查结果（herdr-core 重启后隧道没了，只剩死记录）。
   // 判活必须比标签：重启后地址重新编号，只看地址还在就把死记录当成活的。
+  // 旧版本起的隧道没有标签，argv 对得上就补标签认领 —— 升级不该让它凭空消失。
   async cleanup() {
     const tunnels = await readRecord();
     if (!tunnels.length) return;
     const alive = new Map(terminals().map((t) => [t.address, t]));
-    const kept = tunnels.filter((t) => isOurTerminal(alive.get(t.terminal), t.id));
-    if (kept.length !== tunnels.length) await writeRecord(kept);
+    const kept = [];
+    let changed = false;
+    for (const t of tunnels) {
+      const term = alive.get(t.terminal);
+      if (isOurTerminal(term, t.id)) { kept.push(t); continue; }
+      if (looksLikeTunnel(term, t.localPort)) {
+        const r = await hc(["label", term.address, `abs.pf=${t.id}`]).catch(() => ({ code: 1 }));
+        if (r.code === 0) { kept.push(t); continue; }
+      }
+      changed = true;
+    }
+    if (changed) await writeRecord(kept);
   }
 
   refresh(cx) {
