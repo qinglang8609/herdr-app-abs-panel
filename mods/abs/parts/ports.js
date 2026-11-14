@@ -11,10 +11,13 @@
 //
 // 记录文件只表示"想要什么"，实际状态一律现查：lsof 看端口、terminals() 看
 // 进程。两者不一致以现查为准并修正记录。
+//
+// 列表以服务器为准：同一台机器（herdr 的 machine）下的所有工作区看到同一份
+// 列表，切工作区不变；本机项目没有服务器，列表为空。
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { run, theme, exec, hc, home, appHome, readTextFile, writeTextFile, notify, terminals } from "herdr";
+import { run, theme, exec, hc, home, appHome, readTextFile, writeTextFile, notify, terminals, machines } from "herdr";
 import { icon, activeSpace } from "./lib.js";
 
 const RECORD = () => `${appHome()}/abs-ports.json`;
@@ -83,11 +86,15 @@ function configHosts(text) {
   return hosts;
 }
 
-// herdr 机器名 → ssh 别名（大小写不敏感，找不到用原名）。
-function hostFor(machine, hosts) {
-  if (!machine) return hosts[0] ?? null;
-  return hosts.find((h) => h.toLowerCase() === machine.toLowerCase()) ?? machine;
+// ssh 别名 → 服务器名（herdr 的机器名）。两边常只差大小写（MACOS / macos），
+// 记录按服务器存，切工作区才不会看成两台。
+function machineFor(host) {
+  const name = machines().find((m) => m.name && m.name.toLowerCase() === String(host ?? "").toLowerCase())?.name;
+  return name ?? host;
 }
+
+// 记录里的哪台服务器（老记录只有 host）。
+const serverOf = (t) => t.machine ?? t.host ?? "";
 
 // ---- 端口占用探测 ---------------------------------------------------------
 
@@ -241,12 +248,19 @@ export default class Ports extends View {
     });
   }
 
-  // 当前空间所在的远程机器 → ssh 别名；本机返回 null。
-  currentHost() {
-    const active = activeSpace();
-    const machine = active?.machine ?? null;
+  // 端口列表以服务器为准：同一台机器（machine）下的所有工作区看到同一份列表，
+  // 切工作区不变。本机项目没有服务器，返回 null（列表空）。
+  // 一台机器在 ssh config 里可能对应不止一个别名，全部算这台服务器。
+  currentServer() {
+    const machine = activeSpace()?.machine ?? null;
     if (!machine) return null;
-    return hostFor(machine, this.hosts);
+    const aliases = this.hosts.filter((h) => h.toLowerCase() === machine.toLowerCase());
+    return { machine, aliases: aliases.length ? aliases : [machine] };
+  }
+
+  // 新建 / 编辑时写哪个 ssh 别名：config 里能对上机器名的那个，否则用机器名。
+  currentHost() {
+    return this.currentServer()?.aliases[0] ?? null;
   }
 
   // 打开时核对记录与现查结果（herdr-core 重启后隧道没了，只剩死记录）。
@@ -279,11 +293,13 @@ export default class Ports extends View {
         const configText = await readTextFile(SSH_CONFIG()).catch(() => null);
         const allConfigs = configText ? parseSshConfig(configText) : [];
         this.hosts = configText ? configHosts(configText) : [];
-        // 只留当前远程机器的转发；本机项目则列表为空。
-        const host = this.currentHost();
-        const configs = host ? allConfigs.filter((c) => c.host.toLowerCase() === host.toLowerCase()) : [];
+        // 按服务器取列表：同一台机器下的所有工作区内容相同，本机项目为空。
+        const server = this.currentServer();
+        const aliases = server ? server.aliases.map((a) => a.toLowerCase()) : [];
+        const sameServer = (name) => Boolean(server) && String(name ?? "").toLowerCase() === server.machine.toLowerCase();
+        const configs = allConfigs.filter((c) => aliases.includes(c.host.toLowerCase()));
         const allTunnels = await readRecord();
-        const tunnels = host ? allTunnels.filter((t) => String(t.host ?? "").toLowerCase() === host.toLowerCase()) : [];
+        const tunnels = allTunnels.filter((t) => sameServer(serverOf(t)));
         const terms = terminals();
         const byAddr = new Map(terms.map((t) => [t.address, t]));
 
@@ -346,9 +362,7 @@ export default class Ports extends View {
   }
 
   openForm(mode, item) {
-    const active = activeSpace();
-    const machine = active?.machine ?? null;
-    const host = mode === "add" ? hostFor(machine, this.hosts) : item.host;
+    const host = mode === "add" ? this.currentHost() : item.host;
     this.inputLocal.set_value(mode === "add" ? "" : String(item.localPort));
     this.inputRemoteAddr.set_value(mode === "add" ? "127.0.0.1" : (item.remoteAddr ?? "127.0.0.1"));
     this.inputRemotePort.set_value(mode === "add" ? "" : String(item.remotePort ?? ""));
@@ -423,7 +437,7 @@ export default class Ports extends View {
     const id = `pf-${rand()}`;
     const terminal = await this.launchAndRecord(host, lp, remoteAddr, rp, id);
     const tunnels = await readRecord();
-    tunnels.push({ id, host, localPort: lp, remoteAddr, remotePort: rp, terminal, stopped: false, note: null });
+    tunnels.push({ id, host, machine: this.currentServer()?.machine ?? machineFor(host), localPort: lp, remoteAddr, remotePort: rp, terminal, stopped: false, note: null });
     await writeRecord(tunnels);
   }
 
@@ -443,7 +457,7 @@ export default class Ports extends View {
     }
     const tunnels = await readRecord();
     const x = tunnels.find((t) => t.id === item.id);
-    if (x) { x.host = host; x.localPort = lp; x.remoteAddr = remoteAddr; x.remotePort = rp; x.terminal = terminal; x.stopped = false; x.note = null; }
+    if (x) { x.host = host; x.machine = item.machine ?? this.currentServer()?.machine ?? machineFor(host); x.localPort = lp; x.remoteAddr = remoteAddr; x.remotePort = rp; x.terminal = terminal; x.stopped = false; x.note = null; }
     await writeRecord(tunnels);
   }
 
@@ -518,10 +532,10 @@ export default class Ports extends View {
       const terminal = await this.launchAndRecord(it.host, Number(it.localPort), it.remoteAddr, Number(it.remotePort), id);
       const tunnels = await readRecord();
       if (it.source === "config") {
-        tunnels.push({ id, host: it.host, localPort: it.localPort, remoteAddr: it.remoteAddr, remotePort: it.remotePort, terminal, stopped: false, note: null });
+        tunnels.push({ id, host: it.host, machine: this.currentServer()?.machine ?? machineFor(it.host), localPort: it.localPort, remoteAddr: it.remoteAddr, remotePort: it.remotePort, terminal, stopped: false, note: null });
       } else {
         const x = tunnels.find((t) => t.id === it.id);
-        if (x) { x.terminal = terminal; x.stopped = false; x.note = null; }
+        if (x) { x.terminal = terminal; x.machine = this.currentServer()?.machine ?? machineFor(x.host); x.stopped = false; x.note = null; }
       }
       await writeRecord(tunnels);
     });
@@ -682,10 +696,10 @@ export default class Ports extends View {
 
   render(cx) {
     const t = theme();
-    const host = this.currentHost();
+    const server = this.currentServer();
 
     // 本机项目：空态卡片（正常不会进来，按钮已隐藏，只是兜底）。
-    if (!host) {
+    if (!server) {
       return v_flex().id("abs-ports").w_full().rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border)
         .child(h_flex().h(32).flex_none().px(9).items_center().border_b(1).border_color(t.border)
           .child(div().text_size(12.5).font_semibold().text_color(t.foreground).child("端口转发")))
@@ -705,7 +719,7 @@ export default class Ports extends View {
       .flex_grow(1).flex_basis(0).min_h(0)
       .child(h_flex().h(32).flex_none().px(9).gap(6).items_center().border_b(1).border_color(t.border)
         .child(div().text_size(12.5).font_semibold().text_color(t.foreground).child("端口转发"))
-        .child(div().px(5).rounded(4).bg(t.chrome).text_size(10).text_color(t.muted).child(host))
+        .child(div().px(5).rounded(4).bg(t.chrome).text_size(10).text_color(t.muted).child(server.machine))
         .when(this.items.length > 0, (e) => e.child(div().px(5).rounded(4).bg(t.chrome).text_size(10).text_color(t.muted).child(`${this.items.length} 条`)))
         .child(div().flex_1()))
       .child(div().flex_1().min_h(0).overflow_y_scrollbar().child(
