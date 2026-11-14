@@ -96,6 +96,37 @@ function machineFor(host) {
 // 记录里的哪台服务器（老记录只有 host）。
 const serverOf = (t) => t.machine ?? t.host ?? "";
 
+// 从真在跑的终端里反推转发（回退）：记录丢了、或从没写过记录，只要 ssh -N -L
+// 进程还在，就还能把它找回来，不靠记录文件当唯一真相。
+// 返回 [{ id, host, localPort, remoteAddr, remotePort, terminal }]
+function discoverTunnels(terms) {
+  const out = [];
+  for (const t of terms) {
+    const argv = t.argv ?? [];
+    if (!argv.some((a) => /(^|\/)ssh$/.test(a))) continue;
+    if (!argv.includes("-N")) continue;
+    const host = argv[argv.length - 1];
+    if (!host || host.startsWith("-")) continue;
+    for (let i = 0; i < argv.length - 1; i++) {
+      if (argv[i] !== "-L") continue;
+      const spec = String(argv[i + 1] ?? "");
+      const parts = spec.split(":");
+      // 127.0.0.1:5173:127.0.0.1:80 或 5173:127.0.0.1:80
+      const [localPort, remoteAddr, remotePort] = parts.length === 4 ? parts.slice(1) : parts.length === 3 ? parts : [];
+      if (!/^\d+$/.test(localPort ?? "") || !/^\d+$/.test(remotePort ?? "") || !remoteAddr) continue;
+      out.push({
+        id: `found-${t.address}-${localPort}`,
+        host,
+        localPort,
+        remoteAddr,
+        remotePort,
+        terminal: t.address,
+      });
+    }
+  }
+  return out;
+}
+
 // ---- 端口占用探测 ---------------------------------------------------------
 
 // 有人监听就返回 { command, pid }，否则 null。
@@ -299,8 +330,21 @@ export default class Ports extends View {
         const sameServer = (name) => Boolean(server) && String(name ?? "").toLowerCase() === server.machine.toLowerCase();
         const configs = allConfigs.filter((c) => aliases.includes(c.host.toLowerCase()));
         const allTunnels = await readRecord();
-        const tunnels = allTunnels.filter((t) => sameServer(serverOf(t)));
         const terms = terminals();
+        // 回退：记录里没有但进程还在的隧道，按实际 ssh -N -L 认领回来（并补标签、
+        // 写回记录），否则记录一丢、面板里就永远看不见这条还在跑的转发。
+        const known = new Set(allTunnels.map((t) => t.terminal));
+        let added = false;
+        for (const f of server ? discoverTunnels(terms) : []) {
+          if (known.has(f.terminal)) continue;
+          if (!aliases.includes(String(f.host).toLowerCase())) continue;
+          allTunnels.push({ ...f, machine: server.machine, stopped: false, note: null });
+          known.add(f.terminal);
+          added = true;
+          await hc(["label", f.terminal, `abs.pf=${f.id}`]).catch(() => null);
+        }
+        if (added) await writeRecord(allTunnels);
+        const tunnels = allTunnels.filter((t) => sameServer(serverOf(t)));
         const byAddr = new Map(terms.map((t) => [t.address, t]));
 
         // 先探测所有相关端口，再组装。
