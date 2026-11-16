@@ -199,6 +199,12 @@ function parseKid(body, parentDone) {
   return rest ? { text: rest, done, mark } : null;
 }
 
+// 看板行里的时间只显示日期：`2026-11-16 11:00` → `2026-11-16`。
+function dateOnly(value) {
+  const m = /\d{4}-\d{2}-\d{2}/.exec(String(value ?? ""));
+  return m ? m[0] : String(value ?? "");
+}
+
 // 子项前面那个标记：写了哪种就显示哪种，没写就跟着父任务的完成状态。
 function kidMark(kid) {
   if (kid?.mark != null && kid.mark !== "") return `[${kid.mark}]`;
@@ -1055,7 +1061,7 @@ export default class AbsPanel extends View {
         e.child(h_flex().w_full().gap(6).items_center()
           .child(div().flex_none().text_size(FS_META).text_color(t.dim).child(task.who || ""))
           .child(div().flex_1())
-          .when(Boolean(task.date), (el) => el.child(div().flex_none().text_size(FS_META).text_color(t.dim).child(task.date)))),
+          .when(Boolean(task.date), (el) => el.child(div().flex_none().text_size(FS_META).text_color(t.dim).child(dateOnly(task.date))))),
       )
       // 子项：在下面按树形列出来，最后一条用 └─。
       .when(kids.length > 0, (e) =>
@@ -1336,7 +1342,7 @@ export default class AbsPanel extends View {
                 .items_center()
                 .child(div().flex_none().text_size(FS_META).text_color(t.dim).child(e.who || ""))
                 .child(div().flex_1())
-                .child(div().flex_none().text_size(FS_META).text_color(t.dim).child(e.when || "")),
+                .child(div().flex_none().text_size(FS_META).text_color(t.dim).child(dateOnly(e.when))),
             );
         })
       : [div().w_full().py(10).text_size(FS_BODY).text_color(t.dim).text_center().child("还没有日志")];
