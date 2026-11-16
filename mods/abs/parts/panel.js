@@ -236,6 +236,16 @@ function scanFields(text) {
   return { fields, rest: text.slice(at).trim() };
 }
 
+// 整个方括号就是一个时间戳才算时间字段（`[2026-11-16]`、`[2026-11-16 08:32]`）。
+function isTimestampField(text) {
+  return /^\d{4}-\d{2}-\d{2}(?:\s+\d{1,2}:\d{2})?$/.test(String(text ?? "").trim());
+}
+
+// 整个方括号就是一串会话 id（`01a1ddf4-c135-72fd-8d4e-bf4ead456730`）。
+function isSessionId(text) {
+  return /^[0-9a-f]{6,}(?:-[0-9a-f]{2,})+$/i.test(String(text ?? "").trim());
+}
+
 // 方括号里那个词是不是状态：进行中 / 讨论中 / 滞留中 / 搁置 / 已完成 这类。
 function isStateWord(text) {
   return /^(?:.{1,6}中|搁置|暂停|待办|未开始|未完成|已完成|不再做)$/.test(String(text ?? "").trim());
@@ -264,8 +274,11 @@ function parseTask(body, fallbackDone, fallbackState) {
   for (const f of fields) {
     if (f.kind === "author") { authors.push(f.text); continue; }
     const text = f.text;
-    const dt = /\d{4}-\d{2}-\d{2}(?:\s+\d{1,2}:\d{2})?/.exec(text);
-    if (dt) { if (!date) date = dt[0]; continue; }
+    // 整个方括号就是时间才算时间字段：`[2026-11-16 08:32]`。
+    // 标题里带日期（`[audit-2026-11-16 审查项目]`）不能被当成时间。
+    if (isTimestampField(text)) { if (!date) date = text; continue; }
+    // 纯会话 id 不占标题位，当标签。
+    if (isSessionId(text)) { tags.push(text); continue; }
     // 标题是第一个方括号（旧文件里第一个可能是 `[进行中]` 这种状态词，那只当状态）。
     if (!title) {
       if (isStateWord(text)) { if (!tagState) tagState = text; continue; }
@@ -466,8 +479,8 @@ function parseLog(text) {
     for (const f of fields) {
       if (f.kind === "author") { authors.push(f.text); continue; }
       const text = f.text;
-      const dt = /\d{4}-\d{2}-\d{2}(?:\s+\d{1,2}:\d{2})?/.exec(text);
-      if (dt) { if (!when) when = dt[0]; continue; }
+      if (isTimestampField(text)) { if (!when) when = text; continue; }
+      if (isSessionId(text)) { tags.push(text); continue; }
       if (!title) {
         const slug = /^([a-z0-9][a-z0-9._-]*)\s+(?=\S)/.exec(text);
         if (slug) { if (!id) id = slug[1]; title = text.slice(slug[0].length).trim(); }
