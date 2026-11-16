@@ -668,8 +668,11 @@ export default class AbsPanel extends View {
   // 只让「当前这一页」定时刷新。切走就停掉，切回来先立刻刷一次再重新起表。
   syncTimers(cx) {
     const view = shared("abs.view") ?? this.view ?? "sessions";
-    if (view === this.timerView) return;
-    this.timerView = view;
+    // 换机器/换目录也要重建轮询表：远程是 5 秒、本机是 30 秒，看的是不同的表。
+    const at = this.where();
+    const timerKey = `${view}|${at.on ?? ""}|${at.dir ?? ""}`;
+    if (timerKey === this.timerView) return;
+    this.timerView = timerKey;
 
     // 停掉上一页的表（Task.cancel）。
     for (const task of this.stops ?? []) {
@@ -807,8 +810,12 @@ export default class AbsPanel extends View {
     if (hit && !this.docsStale && Date.now() - hit.at < ttl) return hit.docs;
 
     const docs = { todo: [], log: [], index: [] };
+    // 备份/归档目录里的同名文件不算：`.brain.bak-202611161041/todo.md` 这类会让同一条任务
+    // 显示两次（旧副本还没打勾），看起来像「已完成的任务还在进行中」。
+    const isBackup = (p) => /(?:^|\/)(?:\.brain)?(?:[._-]bak|backup|archived|old)(?:[._/-]|$)/i.test(String(p));
     const take = (paths) => {
       for (const p of paths) {
+        if (isBackup(p)) continue;
         const base = String(p).slice(String(p).lastIndexOf("/") + 1).toLowerCase().replace(/\.md$/, "");
         // 每种最多收 8 份：目录里堆了几十份同名文件时，别每轮都读几十遍。
         if (docs[base] && docs[base].length < 8) docs[base].push(p);
@@ -1181,7 +1188,14 @@ export default class AbsPanel extends View {
     const done = (this.todo.done ?? []).filter((x) => !String(x?.id ?? "").startsWith("log-"));
     const linked = this.linkedTasks ?? [];
     // 进行中的也在这张列表里：不分段，全部按日期倒排，最新的在上面。
-    const all = [...doing, ...done, ...linked]
+    // 去重：同一条任务可能来自两份文件（不同副本/会话展开），保留「已完成」的那份。
+    const unique = new Map();
+    for (const task of [...doing, ...done, ...linked]) {
+      const key = `${task.title}|${task.date ?? ""}`;
+      const had = unique.get(key);
+      if (!had || (!had.done && task.done)) unique.set(key, task);
+    }
+    const all = [...unique.values()]
       .sort((a, b) => String(b.date ?? "").localeCompare(String(a.date ?? "")));
     const PER = 20;
     const pages = Math.max(1, Math.ceil(all.length / PER));
