@@ -964,7 +964,8 @@ export default class AbsPanel extends View {
         this.toggleLog(item.id, this.lastCx);
         return;
       }
-      const meta = [item.state, item.verdict, item.id, item.who, item.date].filter(Boolean);
+      // 标签（新格式方括号里除标题/时间/作者之外的）也摆在这里，别读完就丢。
+      const meta = [item.state, item.verdict, item.id, item.who, item.date, ...(item.tags ?? [])].filter(Boolean);
       const body = [
         ...(item.note ? [item.note] : []),
         ...(item.children.length ? ["", "子项：", ...item.children.map((k) => `${kidMark(k)} ${k.text}`)] : []),
@@ -1019,7 +1020,9 @@ export default class AbsPanel extends View {
       .child(h_flex().gap(6).items_center()
         .child(div().size(6).flex_none().rounded(3).bg(dot))
         .child(div().flex_1().min_w(0).truncate().text_size(FS_ITEM).font_semibold().text_color(t.foreground).child(task.title))
-        .when(Boolean(task.state), (e) => e.child(div().flex_none().px(5).py(1).rounded(4).bg(this.stateBadge(t, task.state)).text_size(FS_BADGE).text_color("#ffffff").child(task.state))))
+        .when(Boolean(task.state), (e) => e.child(div().flex_none().px(5).py(1).rounded(4).bg(this.stateBadge(t, task.state)).text_size(FS_BADGE).text_color("#ffffff").child(task.state)))
+        .children((task.tags ?? []).slice(0, 3).map((tag) =>
+          div().flex_none().px(5).py(1).rounded(4).bg(t.chrome).text_size(FS_BADGE).text_color(t.muted).child(tag))))
       // 第二行：描述，没有就不画这一行
       .when(Boolean(detail), (e) =>
         e.child(div().w_full().min_w(0).truncate().text_size(FS_META).text_color(t.dim).child(detail)),
