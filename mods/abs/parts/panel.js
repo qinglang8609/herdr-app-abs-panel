@@ -1714,7 +1714,9 @@ export default class AbsPanel extends View {
       .flex_none()
       .gap(3)
       .pl(8)
-      .pr(28)
+      // 平时只留正常内边距，不替 × 预留 28px；鼠标落上来时内容整体左移，让出 × 的位置。
+      .pr(8)
+      .when(arming || this.hoveredSess === s.id, (e) => e.pr(36))
       .py(7)
       .rounded(7)
       .when(arming, (e) => e.bg(t.ansi1))
