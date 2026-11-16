@@ -214,23 +214,97 @@ function kidColor(t, kid) {
 
 // 一条顶层任务。没写 checkbox 时用 fallbackDone（所在分区是不是「已完成」），
 // 没写 `[状态]` 时用 fallbackState（`## 进行中` 这类分区标题）。
+// 方括号里的东西按内容认，不按位置：新标准行是
+//   `- [ ] [标题] [2026-11-16 11:00] [[fanchao]] [01a1c4c6-c75c-…] [任意标签]`
+// 顺序可能乱，但只要三种一定分得清：第一个「不像状态、不像 id、不带日期」的方括号是标题，
+// 带日期的是时间，双括号是作者，像 id 的是 id，剩下的都算标签。
+function scanBrackets(text) {
+  const brackets = [];
+  const authors = [];
+  const plain = [];
+  const re = /\[\[([^\]]+)\]\]|\[([^\[\]]*)\]/g;
+  let m, at = 0;
+  while ((m = re.exec(text))) {
+    const before = text.slice(at, m.index).trim();
+    if (before) plain.push(before);
+    if (m[1] != null) { if (m[1].trim()) authors.push(m[1].trim()); }
+    else if (m[2].trim()) brackets.push(m[2].trim());
+    at = m.index + m[0].length;
+  }
+  const after = text.slice(at).trim();
+  if (after) plain.push(after);
+  return { brackets, authors, plain };
+}
+
+// 方括号里那个词是不是状态：进行中 / 讨论中 / 滞留中 / 搁置 / 已完成 这类。
+function isStateWord(text) {
+  return /^(?:.{1,6}中|搁置|暂停|待办|未开始|未完成|已完成|不再做)$/.test(String(text ?? "").trim());
+}
+
+// 方括号里那串是不是会话 id：`01a1c4c6-c75c-7001-…`。
+function looksLikeId(text) {
+  return /^[0-9a-f]{6,}(?:-[0-9a-f]{2,})+$/i.test(String(text ?? "").trim());
+}
+
+// 一条顶层任务。没写 checkbox 时用 fallbackDone（所在分区是不是「已完成」），
+// 没写状态时用 fallbackState（`## 进行中` 这类分区标题）。
 function parseTask(body, fallbackDone, fallbackState) {
   let rest = String(body ?? "").trim();
   let done = fallbackDone === true;
   let state = "";
   const box = /^\[([ xX+\-~]?)\]\s*/.exec(rest);
   if (box) {
-    done = markDone(box[1]);
-    state = done ? "" : markState(box[1]);
+    const mark = box[1].trim();
+    done = markDone(mark);
+    // `[ ]` 只说明没做完，不硬当「进行中」：状态留给方括号标签或分区标题。
+    state = mark && !done ? markState(mark) : "";
     rest = rest.slice(box[0].length).trim();
   }
-  // `[进行中]` 这类旧写法也认，行里的标签优先于分区标题。
-  const st = /^\[([^\[\]]{1,20})\]\s*/.exec(rest);
-  if (st && !/^\s*[xX+\-~]?\s*$/.test(st[1])) { state = st[1].trim(); rest = rest.slice(st[0].length).trim(); }
   if (!rest) return null;
+
+  const { brackets, authors, plain } = scanBrackets(rest);
+  let title = "", date = "", id = "", tagState = "";
+  const tags = [];
+  for (const text of brackets) {
+    const dt = /\d{4}-\d{2}-\d{2}(?:\s+\d{1,2}:\d{2})?/.exec(text);
+    if (dt) { if (!date) date = dt[0]; continue; }
+    if (looksLikeId(text)) { if (!id) id = text; continue; }
+    if (isStateWord(text)) { if (!tagState) tagState = text; continue; }
+    if (!title) { title = text; continue; }
+    tags.push(text);
+  }
+  const who = authors.find((a) => !a.startsWith("log-")) ?? "";
+  const linkId = authors.find((a) => a.startsWith("log-")) ?? "";
+  if (tagState && !done) state = tagState;
+
+  // 方括号里有标题：新标准格式，正文（方括号外）剩下的当说明。
+  if (title) {
+    // `[[log-日期]]` 是完成任务 N 条的汇总行：没写勾也算已完成。
+    if (!box && linkId) done = true;
+    if (!state && !done) state = fallbackState || "进行中";
+    return {
+      group: done ? "done" : "doing", done, state, id: id || linkId, who,
+      box: Boolean(box), linked: Boolean(linkId) || authors.length > 0,
+      date: date || parenDate(rest),
+      title, note: plain.join(" — ").trim(), tags,
+      verdict: /【([^】]+)】/.exec(rest)?.[1] ?? "",
+      kids: 0, children: [], line: rest,
+    };
+  }
+
+  // 没有标题方括号：老格式 `id [[作者]] — 标题 — 结语`，照旧读。
+  return parseOldTask(rest, done, state, fallbackState, Boolean(box), date);
+}
+
+// 老格式那一套：不再优先，只是留着让旧文件继续能读。
+function parseOldTask(rest, done, state, fallbackState, hasBox, date) {
+  // `[进行中]` 这类行内标签。
+  let body = rest;
+  const st = /^\[([^\[\]]{1,20})\]\s*/.exec(body);
+  if (st && !/^\s*[xX+\-~]?\s*$/.test(st[1]) && isStateWord(st[1])) { state = st[1].trim(); body = body.slice(st[0].length).trim(); }
   if (!state && !done) state = fallbackState || "进行中";
   // `id [[作者]] — 标题 — 结语`：按破折号切成几段。第一段只有 id 和作者时，标题在第二段。
-  const segs = rest.split(/\s+[—–]\s+/);
+  const segs = body.split(/\s+[—–]\s+/);
   const main = segs[0] ?? "";
   const tail = segs.slice(1);
   const links = [...main.matchAll(/\[\[([^\]]+)\]\]/g)].map((m) => m[1]);
@@ -257,11 +331,13 @@ function parseTask(body, fallbackDone, fallbackState) {
   }
   // 标题尾巴上挂的 `(认领 2026-11-13 sess-1)` 这类时间戳不要。
   title = title.replace(/\s*\([^)]*\d{4}-\d{2}-\d{2}[^)]*\)\s*/g, " ").replace(/\s+/g, " ").trim();
+  // `[[log-日期]]` 是完成任务 N 条的汇总行：没写勾也算已完成，也别挂状态标签。
+  if (!hasBox && String(id).startsWith("log-")) { done = true; state = ""; }
   return {
     group: done ? "done" : "doing", done, state, id, who,
-    box: Boolean(box), linked: links.length > 0,
-    date: parenDate(body),
-    title: title || id || "(未命名)", note,
+    box: hasBox, linked: links.length > 0,
+    date: date || parenDate(rest),
+    title: title || id || "(未命名)", note, tags: [],
     verdict: /【([^】]+)】/.exec(rest)?.[1] ?? "",
     kids: 0, children: [], line: rest,
   };
