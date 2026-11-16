@@ -483,6 +483,8 @@ function parseLog(text) {
     const whenOld = at[2] ? `${at[1]} ${at[2]}` : at[1];
     rest = rest.slice(0, at.index) + " " + rest.slice(at.index + at[0].length);
     rest = rest.replace(/\[\[[^\]]+\]\]/g, " ").replace(/[[\]【】]/g, " ").replace(/\s+/g, " ").trim();
+    // 时间后面可能跟着 `—` 这类装饰，先剥掉，否则它会被当成「类型」。
+    rest = rest.replace(/^[—–\-|\s]+/, "");
     // `dev | 正文`：竖线左边是一个词就当类型，否则整段都是正文。
     let kind = "", text = rest;
     const bar = rest.indexOf("|");
