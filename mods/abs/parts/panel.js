@@ -451,25 +451,47 @@ function parseLog(text) {
   for (const raw of stripFences(text)) {
     const line = raw.trim();
     if (!line) continue;
-    const isHead = /^#{1,6}\s/.test(line);
-    if (!isHead && !/^(?:[-*+]|\d+[.)])\s/.test(line)) continue;
-    let rest = line.replace(/^(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)/, "");
-    const at = /(\d{4}-\d{2}-\d{2})(?:[ T](\d{1,2}:\d{2}))?/.exec(rest);
-    if (!at) continue; // 没有日期的标题只是分节，不是记录
-    const when = at[2] ? `${at[1]} ${at[2]}` : at[1];
-    // 先摘作者（要保留双方括号才能识别），再把时间头和剩下的方括号去掉。
-    const who = /\[\[([^\]]+)\]\]/.exec(rest)?.[1] ?? "";
+    if (!/^#{1,6}\s/.test(line) && !/^(?:[-*+]|\d+[.)])\s/.test(line)) continue;
+    const body = line.replace(/^#{1,6}\s+/, "").replace(/^(?:[-*+]|\d+[.)])\s+/, "").trim();
+    if (!body) continue;
+
+    // 新标准行跟 todo 一样：`## [2026-11-16 11:00] [[作者]] [标题] [标签]`。
+    // 方括号按内容认、不按顺序；有标题方括号就走新格式，没有就退回老格式。
+    const { brackets, authors, plain } = scanBrackets(body);
+    let when = "", title = "", id = "";
+    const tags = [];
+    for (const t of brackets) {
+      const dt = /\d{4}-\d{2}-\d{2}(?:\s+\d{1,2}:\d{2})?/.exec(t);
+      if (dt) { if (!when) when = dt[0]; continue; }
+      if (looksLikeId(t)) { if (!id) id = t; continue; }
+      if (!title) { title = t; continue; }
+      tags.push(t);
+    }
+    const who = authors.find((a) => !a.startsWith("log-")) ?? "";
+    if (title) {
+      out.push({
+        when: when || parenDate(body), who, kind: "", id, tags,
+        title, text: plain.join(" ").trim(), line: body,
+      });
+      continue;
+    }
+
+    // 老格式：`## [时间] [[作者]] 类型 | 正文`，没有日期就不是记录。
+    const at = /(\d{4}-\d{2}-\d{2})(?:[ T](\d{1,2}:\d{2}))?/.exec(body);
+    if (!at) continue;
+    let rest = body;
+    const whenOld = at[2] ? `${at[1]} ${at[2]}` : at[1];
     rest = rest.slice(0, at.index) + " " + rest.slice(at.index + at[0].length);
     rest = rest.replace(/\[\[[^\]]+\]\]/g, " ").replace(/[[\]【】]/g, " ").replace(/\s+/g, " ").trim();
     // `dev | 正文`：竖线左边是一个词就当类型，否则整段都是正文。
-    let kind = "", body = rest;
+    let kind = "", text = rest;
     const bar = rest.indexOf("|");
     if (bar > 0) {
       const left = rest.slice(0, bar).trim();
-      if (left && !/\s/.test(left)) { kind = left; body = rest.slice(bar + 1).trim(); }
-      else body = rest.replace(/\|/g, " ").replace(/\s+/g, " ").trim();
+      if (left && !/\s/.test(left)) { kind = left; text = rest.slice(bar + 1).trim(); }
+      else text = rest.replace(/\|/g, " ").replace(/\s+/g, " ").trim();
     }
-    out.push({ when, who, kind, text: body });
+    out.push({ when: whenOld, who, kind, id: "", tags: [], title: "", text, line: body });
   }
   // 按时间戳排，新的在前。不能只 reverse：log.md 里的行不保证严格追加，
   // 早先的记录可能写在后面，光反转发会把日期搞乱。
@@ -994,7 +1016,11 @@ export default class AbsPanel extends View {
     }
     openOverlay({
       mod: "abs-detail", kind: "dialog", width: 640, height: 420,
-      props: { title: item.text.split("\n")[0] || "(空)", meta: [item.kind, item.when, item.who].filter(Boolean), body: item.text.split("\n") },
+      props: {
+        title: item.title || item.text.split("\n")[0] || "(空)",
+        meta: [item.kind, item.when, item.who, item.id, ...(item.tags ?? [])].filter(Boolean),
+        body: item.title ? [(item.text || "(没有正文)"), "", "原始行：", item.line] : item.text.split("\n"),
+      },
     });
   }
 
@@ -1276,12 +1302,16 @@ export default class AbsPanel extends View {
 
     const body = entries.length
       ? entries.map((e) => {
-          // 第一行是 `## [时间] [[作者]] 类型 | 正文` 里的正文首句；
-          // 只写了时间没写正文的记录，就拿类型或时间当标题。
-          const head = (e.text || e.kind || e.when || "(空)").split("\n")[0];
-          const firstStop = head.search(/[。；]/);
-          const title = firstStop > 0 ? head.slice(0, firstStop + 1) : head;
-          const detail = firstStop > 0 ? head.slice(firstStop + 1).trim() : "";
+          // 新格式的标题写在方括号里，正文在方括号外；
+          // 老格式（`## [时间] [[作者]] 类型 | 正文`）就从正文里截首句当标题。
+          let title = e.title || "";
+          let detail = (e.text || "").split("\n")[0];
+          if (!title) {
+            const head = (e.text || e.kind || e.when || "(空)").split("\n")[0];
+            const stop = head.search(/[。；]/);
+            title = stop > 0 ? head.slice(0, stop + 1) : head;
+            detail = stop > 0 ? head.slice(stop + 1).trim() : "";
+          }
           return v_flex()
             .w_full()
             .flex_none()
@@ -1292,8 +1322,11 @@ export default class AbsPanel extends View {
             .cursor_pointer()
             .hover((el) => el.bg(t.chrome))
             .on_click(() => this.openDetail("entry", e))
-            // 第一行：标题
-            .child(div().w_full().min_w(0).truncate().text_size(FS_ITEM).font_semibold().text_color(t.foreground).child(title))
+            // 第一行：标题（新格式的标签挂在右边，跟看板一致）
+            .child(h_flex().w_full().gap(5).items_center()
+              .child(div().flex_1().min_w(0).truncate().text_size(FS_ITEM).font_semibold().text_color(t.foreground).child(title))
+              .children((e.tags ?? []).slice(0, 3).map((tag) =>
+                div().flex_none().px(5).py(1).rounded(4).bg(t.chrome).text_size(FS_BADGE).text_color(t.muted).child(tag))))
             // 第二行：详情
             .when(Boolean(detail), (el) =>
               el.child(div().w_full().min_w(0).truncate().text_size(FS_META).text_color(t.dim).child(detail)),
