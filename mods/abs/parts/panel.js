@@ -220,18 +220,34 @@ function kidColor(t, kid) {
 
 // 一条顶层任务。没写 checkbox 时用 fallbackDone（所在分区是不是「已完成」），
 // 没写 `[状态]` 时用 fallbackState（`## 进行中` 这类分区标题）。
-// 只认**行首连续**的方括号字段：`[标题] [时间] [[作者]] [标签] [id]`。
-// 正文里再出现的方括号是文字（代码片段 `[...doing]`、说明里的 `[x]`），不当字段，
-// 否则旧格式的记录会被这些方括号抢走标题。
+// 只认**行首连续**的方括号字段：`[时间] [标题] [[作者]] [标签] [会话id]`。
+// 正文里再出现的方括号是文字，不当字段。
+// 标题里自己也可能带方括号（`整体解析 markdown 的 [] 判断完成与否`），
+// 所以单个方括号要按层数找配对的那个，不能遇到第一个 `]` 就收。
 function scanFields(text) {
   const fields = [];
   let at = 0;
   for (;;) {
-    const m = /^\s*(\[\[([^\]]+)\]\]|\[([^\[\]]*)\])/.exec(text.slice(at));
-    if (!m) break;
-    if (m[2] != null) fields.push({ kind: "author", text: m[2].trim() });
-    else if (m[3].trim()) fields.push({ kind: "bracket", text: m[3].trim() });
-    at += m[0].length;
+    while (at < text.length && /\s/.test(text[at])) at++;
+    if (text[at] !== "[") break;
+    if (text[at + 1] === "[") {
+      const close = text.indexOf("]]", at + 2);
+      if (close < 0) break;
+      const inner = text.slice(at + 2, close).trim();
+      if (inner) fields.push({ kind: "author", text: inner });
+      at = close + 2;
+      continue;
+    }
+    let depth = 0;
+    let i = at;
+    for (; i < text.length; i++) {
+      if (text[i] === "[") depth++;
+      else if (text[i] === "]") { depth--; if (depth === 0) break; }
+    }
+    if (i >= text.length) break; // 没配对：剩下的都当正文
+    const inner = text.slice(at + 1, i).trim();
+    if (inner) fields.push({ kind: "bracket", text: inner });
+    at = i + 1;
   }
   return { fields, rest: text.slice(at).trim() };
 }
@@ -281,11 +297,9 @@ function parseTask(body, fallbackDone, fallbackState) {
     if (isSessionId(text)) { tags.push(text); continue; }
     // 标题是第一个方括号（旧文件里第一个可能是 `[进行中]` 这种状态词，那只当状态）。
     if (!title) {
+      // 第一个方括号是时间，第二个就是标题：整段原样拿来，不剥 id 也不改写。
       if (isStateWord(text)) { if (!tagState) tagState = text; continue; }
-      // `[todo-panel 修面板逻辑]`：首个 token 是短 id，剩下的才是标题。
-      const slug = /^([a-z0-9][a-z0-9._-]*)\s+(?=\S)/.exec(text);
-      if (slug) { if (!id) id = slug[1]; title = text.slice(slug[0].length).trim(); }
-      else title = text;
+      title = text;
       continue;
     }
     // 除标题、时间、作者之外的一律当标签（会话 id 也是标签）。
@@ -481,12 +495,7 @@ function parseLog(text) {
       const text = f.text;
       if (isTimestampField(text)) { if (!when) when = text; continue; }
       if (isSessionId(text)) { tags.push(text); continue; }
-      if (!title) {
-        const slug = /^([a-z0-9][a-z0-9._-]*)\s+(?=\S)/.exec(text);
-        if (slug) { if (!id) id = slug[1]; title = text.slice(slug[0].length).trim(); }
-        else title = text;
-        continue;
-      }
+      if (!title) { title = text; continue; }
       tags.push(text);
     }
     const who = authors.find((a) => !a.startsWith("log-")) ?? "";
