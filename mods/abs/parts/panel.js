@@ -15,6 +15,8 @@ const SCAN_TIMEOUT = 12000;
 // 和 watch 失效时才靠这个轮询，所以从 5 秒拉长到 30 秒，不再每 5 秒空转。
 const SESS_POLL_MS = 30000;
 const BRAIN_POLL_MS = 30000;
+// 远程机器上没法监听目录，只能轮询；5 秒才不至于让人觉得「不更新」。
+const REMOTE_POLL_MS = 5000;
 // 扫到非空结果后，这么久内不再重扫同一台机器（切工作区会强制重扫）。
 const SESS_TTL_MS = 25000;
 
@@ -693,7 +695,9 @@ export default class AbsPanel extends View {
       stops.push(cx.timer.every(SESS_POLL_MS, (cx) => this.sessRefresh(cx)));
       this.watchSessions(cx);
     } else {
-      stops.push(cx.timer.every(BRAIN_POLL_MS, (cx) => this.refresh(cx)));
+      // 远程机器没有文件监听，只能轮询：5 秒一轮，改了就能看见；本机有 watchFolder，30 秒兜底就够。
+      const every = this.where().on ? REMOTE_POLL_MS : BRAIN_POLL_MS;
+      stops.push(cx.timer.every(every, (cx) => this.refresh(cx)));
     }
     this.stops = stops.filter(Boolean);
   }
@@ -734,7 +738,7 @@ export default class AbsPanel extends View {
           cx.notify();
           return;
         }
-        const texts = await Promise.all(paths.map((p) => readTextFile(p, { on: at.on }).catch(() => null)));
+        const texts = await this.readMany(paths, at.on);
         if (ticket !== this.refreshTicket || context !== this.keyNow()) return;
 
         // 一份都没读到就留着旧数据，不替换成空；读到的几份照常用。
@@ -765,6 +769,27 @@ export default class AbsPanel extends View {
     });
   }
 
+  // 读多份文件：本机并行读；远程用一个 exec 全读回来（一个 ssh 连接，不是一个文件一趟）。
+  async readMany(paths, on) {
+    if (!paths.length) return [];
+    if (!on) return Promise.all(paths.map((p) => readTextFile(p, { on }).catch(() => null)));
+    const parts = paths.map((p, i) => {
+      const q = `'${String(p).replace(/'/g, "'\\''")}'`;
+      // \u0001<序号>\u0001 当分隔符：文件内容里不会出现它。
+      return `printf '\\001%d\\001' ${i}; cat ${q} 2>/dev/null`;
+    });
+    const r = await exec("sh", ["-c", parts.join("; ")], { on }).catch(() => null);
+    const text = String(r?.stdout ?? "");
+    return paths.map((_p, i) => {
+      const mark = `\u0001${i}\u0001`;
+      const at = text.indexOf(mark);
+      if (at < 0) return null;
+      const from = at + mark.length;
+      const next = text.indexOf(`\u0001${i + 1}\u0001`, from);
+      return text.slice(from, next < 0 ? undefined : next);
+    });
+  }
+
   keyNow() {
     const at = this.where();
     return `${at.on ?? ""}|${at.dir ?? ""}`;
@@ -777,7 +802,9 @@ export default class AbsPanel extends View {
   async findDocs(at) {
     const key = `${at.on ?? ""}|${at.dir ?? ""}`;
     const hit = (this.docsCache ?? {})[key];
-    if (hit && !this.docsStale && Date.now() - hit.at < 60000) return hit.docs;
+    // 清单缓存：本机 60 秒（改动由 watch 触发重扫）；远程 20 秒，新建的文件不至于等太久。
+    const ttl = at.on ? 20000 : 60000;
+    if (hit && !this.docsStale && Date.now() - hit.at < ttl) return hit.docs;
 
     const docs = { todo: [], log: [], index: [] };
     const take = (paths) => {
