@@ -30,21 +30,20 @@ function norm(p) {
   return String(p || "").replace(/\/+$/, "");
 }
 
-// 相对时间
-function ago(ms) {
-  const d = Date.now() - ms;
-  if (d < 60_000) return "刚刚";
-  if (d < 3_600_000) return `${Math.floor(d / 60_000)} 分钟前`;
-  if (d < 86_400_000) return `${Math.floor(d / 3_600_000)} 小时前`;
-  if (d < 7 * 86_400_000) return `${Math.floor(d / 86_400_000)} 天前`;
-  const t = new Date(ms);
-  return `${t.getMonth() + 1}月${t.getDate()}日`;
+// 会话行里的时间：`11-16 10:32`
+function whenText(ms) {
+  const d = new Date(Number(ms) || 0);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-function sizeText(bytes) {
-  if (bytes < 1024) return `${bytes}B`;
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)}K`;
-  return `${(bytes / 1024 / 1024).toFixed(1)}M`;
+// token 数：`12.3万` / `1.5亿`
+function tokensText(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v <= 0) return "…";
+  if (v >= 1e8) return `${(v / 1e8).toFixed(1)}亿`;
+  if (v >= 1e4) return `${(v / 1e4).toFixed(1)}万`;
+  return String(Math.round(v));
 }
 
 // 自带 UTF-8 + base64：这套运行时没有 TextEncoder / btoa。
@@ -58,7 +57,7 @@ function nodeProbeCommand() {
   return `${nodeSh()}; [ -n "$n" ] && printf '%s' "$n"`;
 }
 
-function remoteScanCommand(scriptText, limit) {
+function remoteScanCommand(scriptText, args) {
   // 把脚本原样从 stdin 喂给 node：不写临时文件，不用 base64。
   // 以前用 base64 + mktemp，在部分机器上 sh 会报
   //   /usr/bin/base64: Operation not permitted
@@ -71,7 +70,7 @@ function remoteScanCommand(scriptText, limit) {
     `h=$(uname -n 2>/dev/null)`,
     nodeSh(),
     `[ -n "$n" ] || { echo "没找到 node：$h" >&2; exit 127; }`,
-    `"$n" - --limit ${limit} <<'${tag}'`,
+    `"$n" - ${(args ?? []).join(" ")} <<'${tag}'`,
     text,
     tag,
   ].join("\n");
@@ -1466,7 +1465,7 @@ export default class AbsPanel extends View {
     });
   }
 
-  sessCards() {
+  sessCards(cx) {
     const t = theme();
     const list = this.sessVisible();
     const bg = t.background;
@@ -1514,7 +1513,9 @@ export default class AbsPanel extends View {
       .child(div().text_size(FS_META).text_color(t.muted).child(`${page + 1} / ${pages}`))
       .child(btn("abs-sess-next", "Next ›", page + 1, page < pages - 1));
 
-    return [this.card(this.machine ? `pi 会话 · ${this.machine}` : "pi 会话", list.length, body, 1, footer, 0)];
+    // 当前这一页的 token 数，缺的现数
+    this.sessTokens(cx, shown);
+    return [this.card(this.machine ? `PI会话 · ${this.machine}` : "PI会话", list.length, body, 1, footer, 0)];
   }
 
   sessTargets() {
@@ -1531,9 +1532,9 @@ export default class AbsPanel extends View {
   }
 
   // 拼好的远程扫描命令：脚本不变就别每轮都重拼 3.7KB 字符串。
-  remoteCmdFor() {
+  remoteCmdFor(args) {
     if (this.remoteCmd?.script === this.scriptText) return this.remoteCmd.cmd;
-    const cmd = remoteScanCommand(this.scriptText, LIMIT);
+    const cmd = remoteScanCommand(this.scriptText, args ?? ["--limit", String(LIMIT)]);
     this.remoteCmd = { script: this.scriptText, cmd };
     return cmd;
   }
@@ -1555,6 +1556,44 @@ export default class AbsPanel extends View {
     const r = await exec(this.nodeBin, [path, "--limit", String(LIMIT)], { timeout: SCAN_TIMEOUT });
     if (r.code !== 0) throw new Error((r.stderr || r.stdout || "扫描失败").trim().slice(0, 160));
     return JSON.parse((r.stdout || "").trim() || "{}").sessions ?? [];
+  }
+
+  // 数 token：只给当前这一页要显示的会话数（整份读完很贵，不能每轮都扫全部）。
+  // 结果按「文件 + mtime」缓存，会话没变就不再数。
+  sessTokens(cx, list) {
+    if (this.tokenBusy) return;
+    const todo = list.filter((x) => x?.file && (!this.tokenCache?.[x.file] || this.tokenCache[x.file].at !== x.mtime));
+    if (!todo.length) return;
+    this.tokenBusy = true;
+    const on = this.machine ?? null;
+    cx.spawn(async (cx) => {
+      try {
+        const files = todo.map((x) => x.file);
+        let out = {};
+        if (on) {
+          if (!this.scriptText) return;
+          const args = ["--tokens", ...files.map((f) => `'${String(f).replace(/'/g, "'\\''")}'`)];
+          const r = await exec("sh", ["-c", this.remoteCmdFor(args)], { on, timeout: SCAN_TIMEOUT });
+          if (r.code === 0) out = JSON.parse((r.stdout || "").trim() || "{}").tokens ?? {};
+        } else {
+          if (this.nodeBin === null) {
+            const probe = await exec("sh", ["-c", nodeProbeCommand()], { timeout: 8000 });
+            this.nodeBin = (probe.stdout || "").trim();
+          }
+          if (!this.nodeBin) return;
+          const path = this.scriptPath || this.scanScriptCandidates()[0];
+          const r = await exec(this.nodeBin, [path, "--tokens", ...files], { timeout: SCAN_TIMEOUT });
+          if (r.code === 0) out = JSON.parse((r.stdout || "").trim() || "{}").tokens ?? {};
+        }
+        this.tokenCache ??= {};
+        for (const x of todo) this.tokenCache[x.file] = { n: Number(out[x.file] ?? 0), at: x.mtime };
+      } catch {
+        /* 数不出来就不显示，不打断列表 */
+      } finally {
+        this.tokenBusy = false;
+        cx.notify();
+      }
+    });
   }
 
   sessRefresh(cx, force = false) {
@@ -1689,12 +1728,15 @@ export default class AbsPanel extends View {
       })
       .on_click((_e, cx) => this.sessResume(s, cx))
       .child(div().w_full().min_w(0).truncate().text_size(FS_ITEM).font_semibold().text_color(arming ? t.background : t.foreground).child(title))
+      // 第二行：左边时间，右边 token 数
       .child(
         h_flex()
+          .w_full()
           .gap(6)
           .items_center()
-          .child(div().text_size(FS_META).text_color(t.dim).child(ago(s.mtime)))
-          .child(div().text_size(FS_META).text_color(t.dim).child(sizeText(s.size))),
+          .child(div().text_size(FS_META).text_color(t.dim).child(whenText(s.mtime)))
+          .child(div().flex_1())
+          .child(div().text_size(FS_META).text_color(t.dim).child(tokensText(this.tokenCache?.[s.file]?.n))),
       )
       // 删除按钮：平时藏着，鼠标落在这一行时在右侧垂直居中冒出来。无背景、不变色。
       .child(
@@ -1732,7 +1774,7 @@ export default class AbsPanel extends View {
     this.syncTimers(cx);
     // 会话页、看板页、日志页、端口页的卡片自己滚，外层不再滚。
     const fillsPanel = view === "sessions" || view === "board" || view === "log" || view === "ports";
-    const body = view === "sessions" ? this.sessCards()
+    const body = view === "sessions" ? this.sessCards(cx)
       // 看板：进行中、已完成、日志三张卡片，各自占一份高度、各自在里面滚。
       // 看板：任务卡片按内容高，剩下的高度全给日志。
       // 看板：一张卡片，里面分「进行中」和「已完成」，整张卡片一起滚。

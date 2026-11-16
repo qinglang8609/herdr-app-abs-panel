@@ -14,6 +14,29 @@ function flag(name, fallback) {
   return i >= 0 && args[i + 1] !== undefined ? args[i + 1] : fallback;
 }
 
+// `--tokens <file>...`：只数这几份会话的 token（面板只给当前这一页的 20 条数）。
+// 计数要整份读完会话文件（几十 MB 也常见），所以不做成每轮扫，按需单独跑。
+if (args[0] === "--tokens") {
+  const files = args.slice(1);
+  const tokens = {};
+  for (const file of files) {
+    let total = 0;
+    try {
+      const text = fs.readFileSync(file, "utf8");
+      for (const line of text.split("\n")) {
+        if (!line.includes("usage")) continue;
+        let row;
+        try { row = JSON.parse(line); } catch { continue; }
+        const n = Number(row?.message?.usage?.totalTokens ?? 0);
+        if (Number.isFinite(n)) total += n;
+      }
+    } catch { /* 读不到就当 0 */ }
+    tokens[file] = total;
+  }
+  process.stdout.write(JSON.stringify({ ok: true, tokens }) + "\n");
+  process.exit(0);
+}
+
 const LIMIT = Number(flag("--limit", "100")) || 100;
 const ROOT = flag("--root", path.join(os.homedir(), ".pi", "agent", "sessions"));
 
