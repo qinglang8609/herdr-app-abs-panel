@@ -6,6 +6,15 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { props, closeOverlay, run, theme } from "herdr";
 
+// 极简 markdown 行内处理：`代码`、**加粗**、~~删除线~~ 只去符号留文字，
+// 面板里空间小，不为了上样式把字挤掉。
+function inlineText(text) {
+  return String(text ?? "")
+    .replace(/`([^`]*)`/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/~~([^~]+)~~/g, "$1");
+}
+
 export default class AbsDetail extends View {
   init(_props, cx) {
     this.handle = cx.focus_handle();
@@ -14,6 +23,7 @@ export default class AbsDetail extends View {
     this.typed = "";
     this.typing = false;
     this.submitting = false;
+    this.canCheck = p.canCheck === true;
     if (p.input) {
       this.input = InputState.new({ placeholder: p.input.placeholder ?? "" });
       this.input.on("change", (_e, cx) => { this.typed = this.input.value(); cx.notify(); });
@@ -32,6 +42,49 @@ export default class AbsDetail extends View {
     this.submitting = true;
     closeOverlay(p.overlay);
     run(`${p.submit.name}:${text}`);
+  }
+
+  // 正文按 markdown 显示：标题 / 列表 / 勾选项 / 引用 / 代码块。
+  // 勾选行在 canCheck 时可点，点了把这一行的原文交给面板，由面板写回文件。
+  markdownRows(body) {
+    const t = theme();
+    const rows = [];
+    let fence = false;
+    body.forEach((raw, i) => {
+      const line = String(raw ?? "");
+      if (/^\s*(?:```|~~~)/.test(line)) { fence = !fence; return; }
+      if (!line.trim()) { rows.push(div().h(4)); return; }
+      if (fence) { rows.push(div().w_full().text_size(11.5).text_color(t.dim).child(line)); return; }
+      const cb = /^(\s*)[-*+]\s+\[([ xX]?)\]\s*(.*)$/.exec(line);
+      if (cb) {
+        const done = /x/i.test(cb[2]);
+        rows.push(h_flex().id(`abs-detail-cb-${i}`).w_full().gap(6).items_start()
+          .when(this.canCheck, (e) => e.cursor_pointer().hover((s0) => s0.text_color(t.foreground)).on_click(() => run(`abs-panel.check:${line}`)))
+          .child(div().flex_none().text_size(12).text_color(done ? t.accent : t.muted).child(done ? "☑" : "☐"))
+          .child(div().flex_1().min_w(0).text_size(12.5).text_color(done ? t.dim : t.foreground).child(inlineText(cb[3]))));
+        return;
+      }
+      const head = /^(#{1,6})\s+(.*)$/.exec(line);
+      if (head) {
+        const size = head[1].length === 1 ? 14 : head[1].length === 2 ? 13 : 12.5;
+        rows.push(div().w_full().text_size(size).font_semibold().text_color(t.foreground).child(inlineText(head[2])));
+        return;
+      }
+      const bullet = /^\s*[-*+]\s+(.*)$/.exec(line);
+      if (bullet) {
+        rows.push(h_flex().w_full().gap(6).items_start()
+          .child(div().flex_none().text_size(12).text_color(t.muted).child("·"))
+          .child(div().flex_1().min_w(0).text_size(12.5).text_color(t.foreground).child(inlineText(bullet[1]))));
+        return;
+      }
+      const quote = /^\s*>\s?(.*)$/.exec(line);
+      if (quote) {
+        rows.push(div().w_full().pl(8).text_size(12.5).text_color(t.dim).child(inlineText(quote[1])));
+        return;
+      }
+      rows.push(div().w_full().text_size(12.5).text_color(t.muted).child(inlineText(line)));
+    });
+    return rows;
   }
 
   render() {
@@ -55,8 +108,8 @@ export default class AbsDetail extends View {
           .on_click(() => closeOverlay(props().overlay)).child("×")))
       .when(meta.length > 0, (e) => e.child(h_flex().gap(6).flex_none()
         .children(meta.map((m) => div().px(6).py(1).rounded(4).bg(t.raised).border_1().border_color(t.border).text_size(10.5).text_color(t.muted).child(m)))))
-      .when(!p.input, (e) => e.child(div().flex_1().min_h(0).overflow_y_scrollbar().text_size(12.5).text_color(t.muted)
-        .child(v_flex().gap(6).children(body.map((line) => div().child(line || " "))))))
+      .when(!p.input, (e) => e.child(div().flex_1().min_h(0).overflow_y_scrollbar()
+        .child(v_flex().gap(4).w_full().children(p.markdown ? this.markdownRows(body) : body.map((line) => div().child(line || " "))))))
       .when(Boolean(p.input), (e) => e
         .child(div().id("abs-detail-input").h(36).flex_none().px(10).flex().items_center().rounded(8)
           .border_1().border_color(this.typing ? t.accent : t.border).cursor_text()
