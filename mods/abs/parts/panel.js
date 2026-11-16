@@ -78,89 +78,193 @@ function remoteScanCommand(scriptText, limit) {
 }
 
 // ── 解析 ─────────────────────────────────
+//
+// 三份文件都按「能认多少认多少」读：某一行写法出乎意料就跳过这一行，
+// 不让整块面板变空。以后格式改了也不至于报错。
 
-// todo.md 的顶层任务行，形如：
-// - [ ] [进行中] id [[作者]] — 标题 (认领 2026-11-01 会话)
-// - [x] id [[作者]] — 标题 — 结语 【落地】 (完成 2026-10-22 会话)
-function parseTodo(text) {
-  // 只收「进行中」和「已完成」两段。Done 段的 `### 日期` 只用来给任务带上日期，
-  // 不在面板里单独分组显示。
-  const out = { doing: [], done: [], doingTitle: "Todo" };
-  let group = "";
-  let date = "";
-  let currentGroup = null;
-  for (const raw of text.split("\n")) {
-    const line = raw.replace(/\s+$/, "");
-    if (line.startsWith("## ")) {
-      const name = line.slice(3).trim();
-      currentGroup = null;
-      if (name === "Done") group = "done";
-      else if (!out.seen) {
-        out.seen = true;
-        out.doingTitle = name || "Todo";
-        group = "doing";
-      }
-      continue;
-    }
-    if (line.startsWith("### ")) {
-      const name = line.slice(4).trim();
-      date = name;
-      currentGroup = null;
-      continue;
-    }
-    if (/^\s*-\s/.test(raw) && line !== raw.trimStart()) {
-      const parent = out[group === "doing" ? "doing" : "done"].at(-1);
-      if (parent) {
-        const rest = line.trim().replace(/^-\s+/, "");
-        const done = rest.startsWith("[x]");
-        const kid = rest.replace(/^\[[ x]\]\s*/, "").trim();
-        if (kid) { parent.kids++; parent.children.push({ text: kid, done }); }
-      }
-      continue;
-    }
-    if (!line.startsWith("- ")) continue;
-    const task = parseTask(line, group === "doing" ? "doing" : "done");
-    if (!task) continue;
-    task.date = task.date || date;
-    out[task.group].push(task);
+// 去掉代码块里的内容：``` 包起来的示例行不该被当成任务或日志。
+function stripFences(text) {
+  const out = [];
+  let fence = false;
+  for (const line of String(text ?? "").split("\n")) {
+    if (/^\s*(?:```|~~~)/.test(line)) { fence = !fence; continue; }
+    if (!fence) out.push(line);
   }
   return out;
 }
 
-function parseTask(line, group) {
-  let body = line.slice(2).trim(), state = "", done = false;
-  const box = /^\[([ x])\]\s+/.exec(body);
+// 括号里的日期：`(认领 2026-11-01 01a1…)`、`(完成 2026-10-22)`、`(2026-11-01)` 都认。
+// 不按前缀词匹配，换成别的说法也能取到日期。
+function parenDate(text) {
+  for (const g of String(text ?? "").match(/\(([^)]*)\)/g) ?? []) {
+    const d = /\d{4}-\d{2}-\d{2}/.exec(g);
+    if (d) return d[0];
+  }
+  return "";
+}
+
+// checkbox 里的那个字符就是状态：
+//   `[ ]` 进行中  `[-]` 滞留中  `[+]` 讨论中  `[x]` 已完成（不再做）  `[~]` 搁置
+// 认不出来的字符当「进行中」，不报错。
+const MARK_STATE = { "-": "滞留中", "+": "讨论中", "~": "搁置" };
+function markState(mark) {
+  return MARK_STATE[String(mark ?? "").trim()] ?? "进行中";
+}
+function markDone(mark) {
+  return /x/i.test(String(mark ?? ""));
+}
+
+// 分区标题像不像「一个状态名」：进行中 / 讨论中 / 滞留中 都是「≤6 字 + 中」。
+// 只看形状，不列具体词，所以「阻塞中」「排队中」也能认。
+// 「已完成」不以「中」结尾，不给它挂标签（完成与否已经由圆点和位置表达）。
+function stateFromHeading(name) {
+  const s = String(name ?? "").trim();
+  return /^.{1,6}中$/.test(s) ? s : "";
+}
+
+// 分区标题像不像「已完成」。先排掉「未完成」这类含相同词的反义标题。
+function isDoneHeading(name) {
+  const s = String(name ?? "");
+  if (/未完成|未结束|进行中|待办|todo|doing|open|active/i.test(s)) return false;
+  return /done|finish|complete|archiv|已完成|完成|归档|结束|关闭|closed/i.test(s);
+}
+
+// todo.md 的任务行，写成什么样都尽量认：
+//   - [ ] [进行中] id [[作者]] — 标题 (认领 2026-11-01 会话)
+//   - [x] id [[作者]] — 标题 — 结语 【落地】 (完成 2026-10-22 会话)
+//   - [[log-2026-11-04]] 完成任务 2 条
+//   - [ ] 没有 id、没有作者的待办
+// 完成与否以 checkbox 为准：`[x]` 算完成，`[ ]` / `[]` 算未完成。
+// 只有不写 checkbox 的行才退回看分区标题（Done / 已完成 / 归档 算完成）。
+// 状态也一样：行里写了 `[进行中]` 就用行里的，没写就用分区标题（`## 进行中` 这类）。
+// strict：会话笔记（sessions/*.md）用。那些文件是散文，随手写的路径行、引用的原话
+// 都不该变任务，只有带 checkbox 或带双链的行才算。
+function parseTodo(text, strict = false) {
+  const out = { doing: [], done: [], doingTitle: "Todo" };
+  let sectionDone = false;
+  let sectionState = "";
+  let date = "";
+  let last = null; // 上一条顶层任务，缩进行挂在它下面
+  for (const raw of stripFences(text)) {
+    const line = raw.replace(/\s+$/, "");
+    if (!line.trim()) continue;
+    const head = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (head) {
+      last = null;
+      const name = head[2].trim();
+      if (head[1].length === 2) {
+        // 二级标题才是分区；分区叫什么都行，只看它像不像「已完成」、像不像一个状态。
+        if (!out.seen) { out.seen = true; out.doingTitle = name || "Todo"; }
+        sectionDone = isDoneHeading(name);
+        sectionState = stateFromHeading(name);
+      } else if (head[1].length > 2 && /\d/.test(name)) {
+        date = name; // `### 2026-11-13` 这类小节标题当日期
+      }
+      continue;
+    }
+    const bullet = /^(\s*)(?:[-*+]|\d+[.)])\s+(.*)$/.exec(line);
+    if (!bullet) continue;
+    if (bullet[1].length > 0) {
+      // 缩进行是上一条任务的子项。
+      if (!last) continue;
+      const kid = parseKid(bullet[2], last.done);
+      if (kid) { last.kids += 1; last.children.push(kid); }
+      continue;
+    }
+    const task = parseTask(bullet[2], sectionDone, sectionState);
+    if (!task) continue;
+    if (strict && !task.box && !task.linked) continue;
+    task.date = task.date || date;
+    task.line = line.trim();
+    last = task;
+    out[task.group].push(task);
+  }
+  // 两段都按日期倒排，最新的在上面；没日期的保持文件里的先后。
+  const byDate = (a, b) => String(b.date ?? "").localeCompare(String(a.date ?? ""));
+  out.doing.sort(byDate);
+  out.done.sort(byDate);
+  return out;
+}
+
+// 子项一行：`- [x] 文本`。子项跟父任务用同一套字符：
+// `[ ]` 进行中、`[-]` 滞留中、`[+]` 讨论中、`[x]` 已完成、`[~]` 搁置。
+// 没写 checkbox 就跟着父任务的状态走。
+function parseKid(body, parentDone) {
+  let rest = String(body ?? "").trim();
+  let done = parentDone === true;
+  let mark = "";
+  const box = /^\[([ xX+\-~]?)\]\s*/.exec(rest);
+  if (box) { mark = box[1].trim(); done = markDone(mark); rest = rest.slice(box[0].length); }
+  rest = rest.replace(/\[\[[^\]]+\]\]\s*/g, "").trim();
+  return rest ? { text: rest, done, mark } : null;
+}
+
+// 子项前面那个标记：写了哪种就显示哪种，没写就跟着父任务的完成状态。
+function kidMark(kid) {
+  if (kid?.mark != null && kid.mark !== "") return `[${kid.mark}]`;
+  return kid?.done ? "[x]" : "[ ]";
+}
+
+// 子项文字颜色：完成变淡，滞留/搁置变红，其余照常。
+function kidColor(t, kid) {
+  if (kid?.done) return t.dim;
+  if (/[-~]/.test(String(kid?.mark ?? ""))) return t.ansi1;
+  return t.muted;
+}
+
+// 一条顶层任务。没写 checkbox 时用 fallbackDone（所在分区是不是「已完成」），
+// 没写 `[状态]` 时用 fallbackState（`## 进行中` 这类分区标题）。
+function parseTask(body, fallbackDone, fallbackState) {
+  let rest = String(body ?? "").trim();
+  let done = fallbackDone === true;
+  let state = "";
+  const box = /^\[([ xX+\-~]?)\]\s*/.exec(rest);
   if (box) {
-    done = box[1] === "x";
-    body = body.slice(box[0].length);
-    const st = /^\[([^\]]+)\]\s*/.exec(body);
-    if (st) { state = st[1]; body = body.slice(st[0].length); }
+    done = markDone(box[1]);
+    state = done ? "" : markState(box[1]);
+    rest = rest.slice(box[0].length).trim();
   }
-  if (!body.includes("[[")) return null;
-  // `- [[log-2026-10-30]] 完成任务 1 条`：方括里的是 id，后面才是说明。
-  const linked = /^\[\[([^\]]+)\]\]\s*(.*)$/.exec(body);
-  if (linked) {
-    return {
-      group, done: true, state: "", id: linked[1], who: "", date: "",
-      title: linked[2] || linked[1], note: "", verdict: "",
-      kids: 0, children: [], line: line.trim(),
-    };
+  // `[进行中]` 这类旧写法也认，行里的标签优先于分区标题。
+  const st = /^\[([^\[\]]{1,20})\]\s*/.exec(rest);
+  if (st && !/^\s*[xX+\-~]?\s*$/.test(st[1])) { state = st[1].trim(); rest = rest.slice(st[0].length).trim(); }
+  if (!rest) return null;
+  if (!state && !done) state = fallbackState || "进行中";
+  // `id [[作者]] — 标题 — 结语`：按破折号切成几段。第一段只有 id 和作者时，标题在第二段。
+  const segs = rest.split(/\s+[—–]\s+/);
+  const main = segs[0] ?? "";
+  const tail = segs.slice(1);
+  const links = [...main.matchAll(/\[\[([^\]]+)\]\]/g)].map((m) => m[1]);
+  let id = "", who = "", title = main;
+  if (/^\s*\[\[/.test(main) && links.length) {
+    // `- [[log-2026-10-30]] 完成任务 1 条`：方括号里是 id，后面才是说明。
+    id = links[0];
+    title = main.replace(/^\[\[[^\]]+\]\]\s*/, "").replace(/\[\[[^\]]+\]\]\s*/g, "");
+  } else {
+    who = links[0] ?? "";
+    // 行中间出现的 `[[log-日期]]` 也是双链，不是作者：当 id，作者看后面那个。
+    if (who.startsWith("log-")) { id = who; who = links[1] ?? ""; }
+    title = main.replace(/\[\[[^\]]+\]\]\s*/g, "");
+    // id 只认行首的小写英文短词（面板里的 id 都是这种）；中文、日期、大写开头的整句当标题。
+    const tok = /^((?=[a-z0-9._-]*[a-z])[a-z0-9][a-z0-9._-]*)\s+/.exec(title);
+    if (tok) { id = tok[1]; title = title.slice(tok[0].length); }
   }
-  const noteAt = body.indexOf(" — ");
-  const main = noteAt < 0 ? body : body.slice(0, noteAt);
-  const note = noteAt < 0 ? "" : body.slice(noteAt + 3);
-  const id = (main.trim().split(/\s+/)[0] || "");
-  const who = /\[\[([^\]]+)\]\]/.exec(main)?.[1] ?? "";
-  // `(完成 2026-11-02 01a19a68-41a9-71)`：只取日期，后面那串是缓存 id。
-  const stamp = /\(认领 ([^)]*)\)/.exec(main)?.[1] ?? /\(完成 ([^)]*)\)/.exec(note)?.[1] ?? "";
-  const date = (/\d{4}-\d{2}-\d{2}/.exec(stamp) ?? [""])[0];
-  let title = main;
-  for (const cut of ["[[", "(认领 "]) {
-    const at = title.indexOf(cut);
-    if (at >= 0) title = title.slice(0, at);
+  title = title.replace(/\s+/g, " ").trim();
+  let note = tail.join(" — ").trim();
+  if (!title && tail.length) {
+    // 第一段只有 id 和作者：《标题》在第二段，后面的归说明。
+    title = tail[0];
+    note = tail.slice(1).join(" — ").trim();
   }
-  title = title.slice(title.indexOf(id) + id.length).trim();
-  return { group, done, state, id, who, date, title: title || id, note, verdict: /【([^】]+)】/.exec(note)?.[1] ?? "", kids: 0, children: [], line: line.trim() };
+  // 标题尾巴上挂的 `(认领 2026-11-13 sess-1)` 这类时间戳不要。
+  title = title.replace(/\s*\([^)]*\d{4}-\d{2}-\d{2}[^)]*\)\s*/g, " ").replace(/\s+/g, " ").trim();
+  return {
+    group: done ? "done" : "doing", done, state, id, who,
+    box: Boolean(box), linked: links.length > 0,
+    date: parenDate(body),
+    title: title || id || "(未命名)", note,
+    verdict: /【([^】]+)】/.exec(rest)?.[1] ?? "",
+    kids: 0, children: [], line: rest,
+  };
 }
 
 // 分区标题是不是「铁律区」。
@@ -172,45 +276,54 @@ function isRulesHeading(head) {
   return /rules/i.test(s) || s.includes("铁律") || s.includes("硬规则");
 }
 
-// index.md 的分类计数，形如 `## Concepts` 后若干 `- [[页]] — 一句话`。
+// index.md 的分类，形如 `## Concepts` 后若干 `- [[页]] — 一句话`。
+// 认得松一点：标题几级都算分类（一级当文件标题跳过），条目符号 - * + 和数字都认，
+// 没写在任何标题下面的条目收进「未分类」，不丢。
 function parseIndex(text) {
   const sections = [];
   const rules = [];
   let current = null;
   let inRules = false;
-  for (const raw of text.split("\n")) {
+  const bucket = () => {
+    if (!current) {
+      current = { name: "未分类", title: "未分类", items: [], stated: null };
+      sections.push(current);
+    }
+    return current;
+  };
+  for (const raw of stripFences(text)) {
     const line = raw.replace(/\s+$/, "");
-    if (line.startsWith("## ")) {
-      // 除了铁律段（单独收成清单），其他 ## 标题一律当分类。
+    if (!line.trim()) continue;
+    const head = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (head) {
+      const name = head[2].trim();
+      if (head[1].length === 1) continue; // 文件标题不是分类
+      inRules = isRulesHeading(name);
+      if (inRules) { current = null; continue; }
       // 不管叫什么名字、有没有带「（N 页）」计数，都不写死。
-      const head = line.slice(3).trim();
-      inRules = isRulesHeading(head);
-      if (inRules) {
-        current = null;
-        continue;
-      }
-      const count = /（\s*(\d+)\s*(?:页|条)?\s*）/.exec(head);
+      const count = /（\s*(\d+)\s*(?:页|条)?\s*）/.exec(name) ?? /\(\s*(\d+)\s*(?:页|条)?\s*\)/.exec(name);
       current = {
-        name: count ? head.slice(0, count.index).trim() : head,
-        title: head,
+        name: count ? name.slice(0, count.index).trim() : name,
+        title: name,
         items: [],
         stated: count ? Number(count[1]) : null,
       };
       sections.push(current);
       continue;
     }
-    if (!line.startsWith("- ")) continue;
-    if (inRules) {
-      const t = line.slice(2).trim();
-      if (t) rules.push(t);
-    } else if (current) {
-      const link = /\[\[([^\]]+)\]\]/.exec(line)?.[1];
-      const about = line.includes(" — ") ? line.slice(line.indexOf(" — ") + 3).trim() : "";
-      current.items.push({ name: link ?? line.slice(2).trim(), about });
-    }
+    const item = /^\s*(?:[-*+]|\d+[.)])\s+(.*)$/.exec(line);
+    if (!item) continue;
+    const body = item[1].trim();
+    if (!body) continue;
+    if (inRules) { rules.push(body); continue; }
+    const link = /\[\[([^\]]+)\]\]/.exec(body)?.[1];
+    const cut = /\s+[—–]\s+/.exec(body);
+    const about = cut ? body.slice(cut.index + cut[0].length).trim() : "";
+    const name = link ?? (cut ? body.slice(0, cut.index).trim() : body);
+    bucket().items.push({ name, about });
   }
-  // 空分类也列出来：标题既然写在 index.md 里，就该显示，不能默默吞掉。
-  return { sections, rules, ruleCount: rules.length };
+  // 空分类不显示：分类只来自 index.md 里的 `##` 标题，题下没有条目就不占一行。
+  return { sections: sections.filter((s) => s.items.length > 0), rules, ruleCount: rules.length };
 }
 
 // 把 index.md 的铁律段换成给定的条目，其余部分原样不动。
@@ -255,24 +368,87 @@ function rebuildRules(text, change) {
 }
 
 // log.md 每条一行：## [YYYY-MM-DD HH:MM] [[作者]] kind | 正文
+// 只要求「这行有日期」，其余都能缺：作者没有就留空，竖线没有就整段当正文；
+// 标题符号 ## / ###、列表符号 - * + 或数字开头，都认。
 function parseLog(text) {
   const out = [];
-  for (const line of text.split("\n")) {
-    if (!line.startsWith("## [")) continue;
-    const close = line.indexOf("] ", 4);
-    if (close < 0) continue;
-    const when = line.slice(4, close).trim();
-    let rest = line.slice(close + 2).trim();
-    const who = /^\[\[([^\]]+)\]\]\s*/.exec(rest);
-    if (who) rest = rest.slice(who[0].length);
-    const bar = rest.indexOf(" | ");
-    const kind = bar < 0 ? "" : rest.slice(0, bar).trim();
-    const text = (bar < 0 ? rest : rest.slice(bar + 3)).trim();
-    out.push({ when, who: who?.[1] ?? "", kind, text });
+  for (const raw of stripFences(text)) {
+    const line = raw.trim();
+    if (!line) continue;
+    const isHead = /^#{1,6}\s/.test(line);
+    if (!isHead && !/^(?:[-*+]|\d+[.)])\s/.test(line)) continue;
+    let rest = line.replace(/^(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)/, "");
+    const at = /(\d{4}-\d{2}-\d{2})(?:[ T](\d{1,2}:\d{2}))?/.exec(rest);
+    if (!at) continue; // 没有日期的标题只是分节，不是记录
+    const when = at[2] ? `${at[1]} ${at[2]}` : at[1];
+    // 先摘作者（要保留双方括号才能识别），再把时间头和剩下的方括号去掉。
+    const who = /\[\[([^\]]+)\]\]/.exec(rest)?.[1] ?? "";
+    rest = rest.slice(0, at.index) + " " + rest.slice(at.index + at[0].length);
+    rest = rest.replace(/\[\[[^\]]+\]\]/g, " ").replace(/[[\]【】]/g, " ").replace(/\s+/g, " ").trim();
+    // `dev | 正文`：竖线左边是一个词就当类型，否则整段都是正文。
+    let kind = "", body = rest;
+    const bar = rest.indexOf("|");
+    if (bar > 0) {
+      const left = rest.slice(0, bar).trim();
+      if (left && !/\s/.test(left)) { kind = left; body = rest.slice(bar + 1).trim(); }
+      else body = rest.replace(/\|/g, " ").replace(/\s+/g, " ").trim();
+    }
+    out.push({ when, who, kind, text: body });
   }
   // 按时间戳排，新的在前。不能只 reverse：log.md 里的行不保证严格追加，
   // 早先的记录可能写在后面，光反转发会把日期搞乱。
   return out.sort((a, b) => String(b.when).localeCompare(String(a.when)));
+}
+
+// 同一个页面可能来自好几份文件：并成一份。任务按日期倒排，最新的在上面。
+function mergeTodo(docs) {
+  const out = { doing: [], done: [], doingTitle: "Todo" };
+  for (const d of docs) {
+    out.doing.push(...(d?.doing ?? []));
+    out.done.push(...(d?.done ?? []));
+    if (d?.doingTitle && out.doingTitle === "Todo") out.doingTitle = d.doingTitle;
+  }
+  const byDate = (a, b) => String(b.date ?? "").localeCompare(String(a.date ?? ""));
+  out.doing.sort(byDate);
+  out.done.sort(byDate);
+  return out;
+}
+
+function mergeLog(lists) {
+  return lists.flat().sort((a, b) => String(b.when ?? "").localeCompare(String(a.when ?? "")));
+}
+
+// 多份同名文件里取「最近」的那一份：离当前目录层级最浅，同层取路径短的。
+// 图谱页用它——只读本项目自己的 index.md，不把子项目的分类和铁律混进来。
+function nearestDoc(paths, dir) {
+  if (!paths || paths.length <= 1) return paths ?? [];
+  const base = dir ? `${String(dir).replace(/\/$/, "")}/` : "";
+  const depth = (p) => (base && p.startsWith(base) ? p.slice(base.length).split("/").length : 99);
+  return [...paths].sort((a, b) => depth(a) - depth(b) || a.length - b.length).slice(0, 1);
+}
+
+function mergeIndex(list) {
+  const sections = [];
+  const rules = [];
+  for (const d of list) {
+    for (const s of d?.sections ?? []) {
+      const hit = sections.find((x) => x.name === s.name);
+      // 同一个分类可能来自好几份 index.md：同名条目只留一条，别把页数算重。
+      if (hit) {
+        for (const it of s.items) {
+          if (hit.seen.has(it.name)) continue;
+          hit.seen.add(it.name);
+          hit.items.push(it);
+        }
+      } else {
+        sections.push({ ...s, items: [...s.items], seen: new Set(s.items.map((x) => x.name)) });
+      }
+    }
+    for (const r of d?.rules ?? []) if (!rules.includes(r)) rules.push(r);
+  }
+  // seen 只是合并时用的，不给外面留。
+  for (const s of sections) delete s.seen;
+  return { sections, rules, ruleCount: rules.length };
 }
 
 // ── 面板 ─────────────────────────────────
@@ -356,6 +532,7 @@ export default class AbsPanel extends View {
     const key = `${where.on ?? ""}|${where.dir ?? ""}`;
     if (key === this.watchKey) return;
     this.watchKey = key;
+    this.docsStale = true;
     this.refresh(cx);
     // 端口页按服务器取列表，换机器就得立刻跟着换；等 4 秒轮询会看着像卡住。
     this.ports?.refresh(cx);
@@ -399,13 +576,13 @@ export default class AbsPanel extends View {
   }
 
   // 当前该刷哪一页：sessions/board → todo，index → index，log → log。
-  // 一次只读一份，别的不碰。读完才替换，失败就保留旧列表（不会变空）。
-  wantFile(view) {
-    if (view === "index") return "index.md";
-    if (view === "log") return "log.md";
-    return "todo.md";
+  wantKind(view) {
+    if (view === "index") return "index";
+    if (view === "log") return "log";
+    return "todo";
   }
 
+  // 同一个页面可能来自好几份文件：都读、都解析，再并成一份。
   refresh(cx) {
     // 定时器、目录监听、切目录会同时叫；只留最新一轮，旧的结果丢掉。
     const ticket = (this.refreshTicket ?? 0) + 1;
@@ -413,32 +590,42 @@ export default class AbsPanel extends View {
     const at = this.where();
     const context = `${at.on ?? ""}|${at.dir ?? ""}`;
     const view = shared("abs.view") ?? this.view;
-    const file = this.wantFile(view);
+    const kind = this.wantKind(view);
     if (this.noteKind === "read") this.note = null;
 
     cx.spawn(async (cx) => {
       try {
-        const dir = await this.findBrain(at);
+        const docs = await this.findDocs(at);
         if (ticket !== this.refreshTicket || context !== this.keyNow()) return;
+        // 看板/日志把目录里找到的都并起来；图谱只取最近的一份 index.md。
+        const paths = kind === "index" ? nearestDoc(docs.index, at.dir) : (docs[kind] ?? []);
+        const first = [...docs.todo, ...docs.log, ...docs.index][0] ?? null;
+        const dir = first ? first.slice(0, first.lastIndexOf("/")) : null;
         this.brainDir = dir;
         this.brainOn = dir ? at.on : null;
         if (dir !== this.watched) this.watched = null;
         this.watch(cx);
-        if (!dir) {
+        if (!paths.length) {
           this.loading = false;
-          if (this.note == null) { this.note = "没找到 .brain 目录"; this.noteKind = "read"; }
+          if (this.note == null) { this.note = `这个目录下没有 ${kind}.md`; this.noteKind = "read"; }
           cx.notify();
           return;
         }
-        const text = await readTextFile(`${dir}/${file}`, { on: at.on }).catch(() => null);
+        const texts = await Promise.all(paths.map((p) => readTextFile(p, { on: at.on }).catch(() => null)));
         if (ticket !== this.refreshTicket || context !== this.keyNow()) return;
 
-        // 读不到就留着旧数据，不替换成空。
-        if (text != null) {
-          if (file === "index.md") this.index = parseIndex(text);
-          else if (file === "log.md") this.log = parseLog(text);
+        // 一份都没读到就留着旧数据，不替换成空；读到的几份照常用。
+        const read = paths.map((p, i) => ({ path: p, text: texts[i] })).filter((x) => x.text != null);
+        if (read.length) {
+          if (kind === "index") this.index = mergeIndex(read.map((x) => parseIndex(x.text)));
+          else if (kind === "log") this.log = mergeLog(read.map((x) => parseLog(x.text)));
           else {
-            this.todo = parseTodo(text);
+            const parsed = read.map((x) => {
+              const one = parseTodo(x.text);
+              for (const t of [...one.doing, ...one.done]) t.src = x.path;
+              return one;
+            });
+            this.todo = mergeTodo(parsed);
             // 双链日志的任务跟着 todo 走：读到了就在这里触发，不在 render 里。
             this.loadLinked(this.todo, cx);
           }
@@ -460,27 +647,57 @@ export default class AbsPanel extends View {
     return `${at.on ?? ""}|${at.dir ?? ""}`;
   }
 
-  // 工作目录往上逐层找 .brain，都没有就用该机器上的 ~/.brain。
-  async findBrain(at) {
-    const on = at.on;
+  // 当前目录下所有 todo.md / log.md / index.md，不分文件夹（不再只认 .brain）。
+  // 当前目录里一份都没找到才往上找两级，再没有就用该机器的 ~/.brain。
+  // 清单缓存 60 秒：30 秒一轮轮询会反复进来，每轮都跑 find 太贵；
+  // 本机目录真有变化时 watch() 会把 docsStale 置上，立刻重扫一次。
+  async findDocs(at) {
+    const key = `${at.on ?? ""}|${at.dir ?? ""}`;
+    const hit = (this.docsCache ?? {})[key];
+    if (hit && !this.docsStale && Date.now() - hit.at < 60000) return hit.docs;
+
+    const docs = { todo: [], log: [], index: [] };
+    const take = (paths) => {
+      for (const p of paths) {
+        const base = String(p).slice(String(p).lastIndexOf("/") + 1).toLowerCase().replace(/\.md$/, "");
+        // 每种最多收 8 份：目录里堆了几十份同名文件时，别每轮都读几十遍。
+        if (docs[base] && docs[base].length < 8) docs[base].push(p);
+      }
+    };
     if (at.dir) {
       let dir = at.dir.replace(/\/$/, "");
-      // 同一个目录短时间内会反复进来（切页、5 秒表、文件变化都叫 refresh），
-      // 每次都从当前目录逐级往上摸一遍太贵：命中过就把答案记住。
-      // 失败的不记（目录里后来新建的 .brain 不能被挡住）。
-      const hitKey = `${on ?? ""}|${dir}`;
-      if (this.brainHit?.key === hitKey) return this.brainHit.dir;
-      for (let i = 0; i < 8 && dir && dir !== "/"; i++) {
-        const text = await readTextFile(`${dir}/.brain/todo.md`, { on }).catch(() => null);
-        if (text !== null) {
-          this.brainHit = { key: hitKey, dir: `${dir}/.brain` };
-          return this.brainHit.dir;
-        }
+      for (let i = 0; i < 3 && dir && dir !== "/"; i++) {
+        take(await this.findDocsIn(dir, at.on));
+        if (docs.todo.length || docs.log.length || docs.index.length) break;
         const cut = dir.lastIndexOf("/");
         dir = cut <= 0 ? "" : dir.slice(0, cut);
       }
     }
-    // 家目录得问那台机器自己：远程的 HOME 往往不是本地那个。问过一次就记住。
+    if (!docs.todo.length && !docs.log.length && !docs.index.length) {
+      const brain = await this.homeBrain(at);
+      if (brain) {
+        // 只收读得到的：文件不存在不算错。三份一起问，别一次等一趟（远程尤其明显）。
+        const names = ["todo", "log", "index"];
+        const texts = await Promise.all(names.map((n) => readTextFile(`${brain}/${n}.md`, { on: at.on }).catch(() => null)));
+        names.forEach((n, i) => { if (texts[i] != null) docs[n].push(`${brain}/${n}.md`); });
+      }
+    }
+    this.docsStale = false;
+    (this.docsCache ??= {})[key] = { docs, at: Date.now() };
+    return docs;
+  }
+
+  // 在一个目录里找这三种文件，最多往下 5 层。找不到返回空数组，不报错。
+  async findDocsIn(dir, on) {
+    const q = `'${String(dir).replace(/'/g, "'\\''")}'`;
+    const cmd = `find ${q} -maxdepth 5 -type f \\( -iname todo.md -o -iname log.md -o -iname index.md \\) -not -path '*/node_modules/*' -not -path '*/.git/*' 2>/dev/null | head -60`;
+    const r = await exec("sh", ["-c", cmd], { on }).catch(() => null);
+    return String(r?.stdout ?? "").split("\n").map((s) => s.trim()).filter(Boolean);
+  }
+
+  // 该机器上的 ~/.brain（远程的 HOME 往往不是本地那个，所以去问它自己）。
+  async homeBrain(at) {
+    const on = at.on;
     let homeDir = home();
     if (on) {
       const known = (this.remoteHome ?? {})[on];
@@ -496,9 +713,7 @@ export default class AbsPanel extends View {
         (this.remoteHome ??= {})[on] = homeDir;
       }
     }
-    const homeBrain = `${homeDir}/.brain`;
-    const text = await readTextFile(`${homeBrain}/todo.md`, { on }).catch(() => null);
-    return text !== null ? homeBrain : null;
+    return `${homeDir}/.brain`;
   }
 
   // .brain 变了就重读，不用等定时器。
@@ -519,6 +734,8 @@ export default class AbsPanel extends View {
         }
         if (this.watched !== dir) return;
         if (!failed) {
+          // 目录真变了：清单也得重扫，否则新建的 todo.md 要等一分钟。
+          this.docsStale = true;
           this.refresh(cx);
           cx.notify();
         }
@@ -631,7 +848,7 @@ export default class AbsPanel extends View {
     for (let i = 0; i < links.length; i += 1) {
       const text = texts[i];
       if (!text) continue;
-      const parsed = parseTodo(text);
+      const parsed = parseTodo(text, true);
       const fresh = [...parsed.doing, ...parsed.done].filter((x) => x && !String(x.id).startsWith("log-"));
       for (const x of fresh) out.push({ ...x, from: links[i] });
     }
@@ -657,7 +874,7 @@ export default class AbsPanel extends View {
     const base = this.brainDir || `${home()}/.brain`;
     const text = await readTextFile(`${base}/sessions/${id}.md`, { on }).catch(() => null);
     if (this.logOpen !== id) return;
-    const parsed = text ? parseTodo(text) : { doing: [], done: [] };
+    const parsed = text ? parseTodo(text, true) : { doing: [], done: [] };
     this.logTasks = [...parsed.doing, ...parsed.done].filter((x) => x && !String(x.id).startsWith("log-"));
     this.logMissing = text ? null : `${base}/sessions/${id}.md 读不到`;
     cx?.notify?.() ?? this.lastCx?.notify?.();
@@ -674,7 +891,7 @@ export default class AbsPanel extends View {
       const meta = [item.state, item.verdict, item.id, item.who, item.date].filter(Boolean);
       const body = [
         ...(item.note ? [item.note] : []),
-        ...(item.children.length ? ["", "子项：", ...item.children.map((k) => `${k.done ? "☑" : "☐"} ${k.text}`)] : []),
+        ...(item.children.length ? ["", "子项：", ...item.children.map((k) => `${kidMark(k)} ${k.text}`)] : []),
         "",
         "原始行：",
         item.line,
@@ -752,9 +969,9 @@ export default class AbsPanel extends View {
                       .flex_none()
                       .text_size(FS_META)
                       .text_color(t.dim)
-                      .child(`${i === kids.length - 1 ? "└─" : "├─"} ${kid.done ? "☑" : "☐"}`),
+                      .child(`${i === kids.length - 1 ? "└─" : "├─"} ${kidMark(kid)}`),
                   )
-                  .child(div().flex_1().min_w(0).truncate().text_size(FS_META).text_color(kid.done ? t.dim : t.muted).child(kid.text)),
+                  .child(div().flex_1().min_w(0).truncate().text_size(FS_META).text_color(kidColor(t, kid)).child(kid.text)),
               ),
             ),
         ),
@@ -786,7 +1003,7 @@ export default class AbsPanel extends View {
                     el.child(div().pl(6).text_size(FS_META).text_color(t.dim).truncate().child(x.note)),
                   )
                   .children((x.children ?? []).map((k) =>
-                    div().pl(6).text_size(FS_META).text_color(t.dim).truncate().child(`${k.done ? "☑" : "☐"} ${k.text}`),
+                    div().pl(6).text_size(FS_META).text_color(kidColor(t, k)).truncate().child(`${kidMark(k)} ${k.text}`),
                   )),
               ),
             ),
@@ -794,16 +1011,17 @@ export default class AbsPanel extends View {
       );
   }
 
-  // 看板：只放进行中的任务。徽章和空提示都去掉。
-  // 一段小标题：左边名字，右边条数。
-  // 看板：一张卡片，进行中和已完成直接排在一起，整张卡片一起滚。
+  // 看板：一张卡片，不分段、不加小标题，没做完的和做完的按时间混排，最新的在上面。
+  // 状态靠圆点颜色和右侧的状态标签区分。
   boardCard(fill = 1) {
     const t = theme();
     const doing = this.todo.doing ?? [];
     // 「完成任务 N 条」这类双链行换成它指向的真实任务：去掉链接行，换成 sessions 里读到的。
     const done = (this.todo.done ?? []).filter((x) => !String(x?.id ?? "").startsWith("log-"));
     const linked = this.linkedTasks ?? [];
-    const all = [...done, ...linked];
+    // 进行中的也在这张列表里：不分段，全部按日期倒排，最新的在上面。
+    const all = [...doing, ...done, ...linked]
+      .sort((a, b) => String(b.date ?? "").localeCompare(String(a.date ?? "")));
     const PER = 20;
     const pages = Math.max(1, Math.ceil(all.length / PER));
     const page = Math.min(Math.max(0, this.boardPage ?? 0), pages - 1);
@@ -846,9 +1064,8 @@ export default class AbsPanel extends View {
       "看板",
       null,
       [
-        ...doing.map((task) => this.taskRow(task)),
-        ...shown.map((task) => this.taskRow(task, true)),
-        ...(all.length === 0 ? [this.emptyNote(t, "还没有已完成的任务")] : []),
+        ...shown.map((task) => this.taskRow(task, task.done)),
+        ...(all.length === 0 ? [this.emptyNote(t, "todo.md 里还没有任务")] : []),
       ],
       fill,
       footer,
@@ -887,6 +1104,7 @@ export default class AbsPanel extends View {
   // 铁律卡：图谱顶上的独立一块，能直接改、能加。
   rulesCard() {
     const t = theme();
+    // 没有铁律段也照样显示这张卡，只是上面写「还没有铁律」。
     const rules = this.index.rules ?? [];
     // writeTextFile 只能写本机，远程的 index.md 改不了。
     const editable = !this.brainOn && Boolean(this.brainDir);
@@ -979,8 +1197,9 @@ export default class AbsPanel extends View {
 
     const body = entries.length
       ? entries.map((e) => {
-          // 第一行是 `## [时间] [[作者]] 类型 | 正文` 里的正文首句。
-          const head = e.text.split("\n")[0] || "(空)";
+          // 第一行是 `## [时间] [[作者]] 类型 | 正文` 里的正文首句；
+          // 只写了时间没写正文的记录，就拿类型或时间当标题。
+          const head = (e.text || e.kind || e.when || "(空)").split("\n")[0];
           const firstStop = head.search(/[。；]/);
           const title = firstStop > 0 ? head.slice(0, firstStop + 1) : head;
           const detail = firstStop > 0 ? head.slice(firstStop + 1).trim() : "";
@@ -1385,6 +1604,6 @@ export default class AbsPanel extends View {
       .child(div().flex_1().min_h(0).p(0).when(fillsPanel, (e) => e.flex(), (e) => e.overflow_y_scrollbar()).child(v_flex().gap(10).w_full().when(fillsPanel, (x) => x.flex_1().min_h(0))
         .when(this.note != null, (e) => e.child(div().px(9).py(7).rounded(8).bg(t.raised).border_1().border_color(t.border).text_size(FS_BODY).text_color(t.ansi3).child(this.note)))
         .when(this.error != null, (e) => e.child(div().px(9).py(7).rounded(8).bg(t.raised).border_1().border_color(t.ansi1).text_size(FS_BODY).text_color(t.ansi1).child(this.error)))
-        .children(body)));
+        .children(body.filter(Boolean))));
   }
 }
