@@ -2,7 +2,7 @@
 // 目录从当前空间的工作目录往上找 .brain，找不到就用 ~/.brain。
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, panes, focused, readTextFile, writeTextFile, watchFolder, exec, hc, theme, home, run, appHome, openOverlay, closeOverlay, nextCommand, shared } from "herdr";
+import { spaces, panes, focused, readTextFile, writeTextFile, watchFolder, exec, hc, theme, home, run, appHome, openOverlay, nextCommand, shared } from "herdr";
 import Ports from "./ports.js";
 
 // ── 会话（pi 历史）───────────────────────
@@ -594,7 +594,6 @@ export default class AbsPanel extends View {
     this.confirmDelete = null;
     this.hoveredSess = null;
     this.logOpen = null;   // 展开的日志 id
-    this.detailFile = null; // 详情弹窗里勾选要写回的文件
     this.logTasks = [];    // 它里面的任务
     this.linkedTasks = []; // 所有双链日志里解析出的任务，平铺在已完成里
     this.linkedFor = null; // 已经读过哪一份 todo
@@ -639,7 +638,6 @@ export default class AbsPanel extends View {
         if (cmd === "open-zed") this.openIn("zed");
         else if (cmd === "open-code") this.openIn("code");
         else if (cmd.startsWith("rule-add:")) this.addRuleText(cmd.slice("rule-add:".length));
-        else if (cmd.startsWith("check:")) this.toggleLine(cmd.slice("check:".length));
         cx.notify();
       }
     });
@@ -1015,17 +1013,13 @@ export default class AbsPanel extends View {
         this.toggleLog(item.id, this.lastCx);
         return;
       }
-      // 勾选要能写回的那份文件：任务自带 src 就用它，否则用找到的 .brain/todo.md。
-      this.detailFile = item.src || (this.brainDir ? `${this.brainDir}/todo.md` : null);
-      // 远程机器上的文件改不了（writeTextFile 只支持本机），勾选框置灰。
-      const canCheck = Boolean(this.detailFile) && !this.brainOn;
       // 跟行格式同一个顺序：时间 → 作者 → 标签 → 会话 id → 状态/结论。
       const meta = [item.date, item.who, ...(item.tags ?? []), item.id, item.state, item.verdict].filter(Boolean);
       // 详情正文只放原始行：文件里那一行本身就带全部字段，不再另外复述。
       const body = [item.line ?? ""];
       openOverlay({
         mod: "abs-detail", kind: "dialog", width: 620, height: 460,
-        props: { title: item.title, meta, body, markdown: true, canCheck },
+        props: { title: item.title, meta, body },
       });
       return;
     }
@@ -1034,7 +1028,6 @@ export default class AbsPanel extends View {
         mod: "abs-detail", kind: "dialog", width: 640, height: 520,
         props: {
           title: item.title || item.name,
-          markdown: true,
           meta: [`${item.items.length} 条`],
           body: item.items.length
             ? item.items.map((x) => `- [[${x.name}]]${x.about ? " — " + x.about : ""}`)
@@ -1049,7 +1042,6 @@ export default class AbsPanel extends View {
         title: item.title || item.text.split("\n")[0] || "(空)",
         meta: [item.when, item.who, ...(item.tags ?? []), item.id, item.kind].filter(Boolean),
         body: [item.line ?? ""],
-        markdown: true,
       },
     });
   }
@@ -1315,38 +1307,6 @@ export default class AbsPanel extends View {
 
   removeRule(index) {
     this.editRules((text) => rebuildRules(text, (cur) => cur.filter((_, i) => i !== index)));
-  }
-
-  // 点勾选：把那一行行首的 `[ ]` ↔ `[x]` 换掉，其余原样写回。
-  // 只改这一行、写前比对原文（期间别人改了文件就放弃，不覆盖）。
-  async toggleLine(rawLine) {
-    const path = this.detailFile;
-    const want = String(rawLine ?? "").trim();
-    if (!path || !want) return;
-    if (this.brainOn) { this.note = `${this.brainOn} 上的文件改不了，只能看`; this.noteKind = "open"; return; }
-    const original = await readTextFile(path).catch(() => null);
-    if (original == null) { this.note = `读不到 ${path}`; this.noteKind = "open"; return; }
-    const lines = original.split("\n");
-    const at = lines.findIndex((l) => l.trim() === want);
-    if (at < 0) {
-      this.note = "这一行在文件里没找到，可能刚被改过；刷新后再点一次";
-      this.noteKind = "open";
-      return;
-    }
-    const next = lines[at].replace(/(^\s*[-*+]\s+)\[([ xX]?)\]/, (_m, head, mark) => `${head}[${/x/i.test(mark) ? " " : "x"}]`);
-    if (next === lines[at]) { this.note = "这一行没有勾选框，改不了"; this.noteKind = "open"; return; }
-    lines[at] = next;
-    try {
-      await writeTextFile(path, lines.join("\n"), original);
-    } catch (e) {
-      this.note = `写 ${path} 失败：${e}`;
-      this.noteKind = "open";
-      return;
-    }
-    this.note = null;
-    this.noteKind = null;
-    closeOverlay();
-    this.refresh(this.lastCx);
   }
 
   addRuleText(rule) {
