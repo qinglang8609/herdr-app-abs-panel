@@ -622,7 +622,6 @@ export default class AbsPanel extends View {
     // 拼好的远程扫描命令，脚本不变就别每轮都重拼。
     this.remoteCmd = null;
     this.note = null;
-    this.watched = null;
     this.watchKey = null;
     // 端口转发页（独立视图，数据不读 .brain）。
     this.ports = new Ports();
@@ -728,8 +727,8 @@ export default class AbsPanel extends View {
         const dir = first ? first.slice(0, first.lastIndexOf("/")) : null;
         this.brainDir = dir;
         this.brainOn = dir ? at.on : null;
-        if (dir !== this.watched) this.watched = null;
-        this.watch(cx);
+        // 每份文件所在目录都监听（本机），并起来的内容才不会漏掉改动。
+        this.watchDirs([...docs.todo, ...docs.log, ...docs.index].map((p) => p.slice(0, p.lastIndexOf("/"))), cx);
         if (!paths.length) {
           this.loading = false;
           if (this.note == null) { this.note = `这个目录下没有 ${kind}.md`; this.noteKind = "read"; }
@@ -841,33 +840,38 @@ export default class AbsPanel extends View {
     return `${homeDir}/.brain`;
   }
 
-  // .brain 变了就重读，不用等定时器。
-  // 本机才能监听目录；远程靠 5 秒一轮的定时器。
-  watch(cx) {
-    const dir = this.brainDir;
-    if (!dir || this.brainOn || this.watched === dir) return;
-    this.watched = dir;
-    cx.spawn(async (cx) => {
-      // 目录被删或改名时 watchFolder 会报错。不能就此停掉，停一下接着试。
-      // herdr-app 没有 setTimeout，只能用 cx.timer。
-      while (this.watched === dir) {
-        let failed = false;
-        try {
-          await watchFolder(dir);
-        } catch {
-          failed = true;
+  // 找到的每份 todo/log/index 所在目录都监听：并起来的东西改了，页面立刻跟着变。
+  // 只在本机做；远程机器没法监听目录，靠 30 秒轮询。
+  watchDirs(dirs, cx) {
+    if (this.brainOn) return;
+    this.watchActive ??= {};
+    const want = [...new Set(dirs.filter(Boolean))];
+    for (const dir of want) {
+      if (this.watchActive[dir]) continue;
+      this.watchActive[dir] = true;
+      cx.spawn(async (cx) => {
+        // 目录被删或改名时 watchFolder 会报错。不能就此停掉，停一下接着试。
+        while (this.watchActive?.[dir]) {
+          let failed = false;
+          try {
+            await watchFolder(dir);
+          } catch {
+            failed = true;
+          }
+          if (!this.watchActive?.[dir]) return;
+          if (!failed) {
+            // 目录真变了：清单也重扫一次，新建的 todo.md 不用等一分钟。
+            this.docsStale = true;
+            this.refresh(cx);
+            cx.notify();
+          }
+          if (failed) await new Promise((resolve) => cx.timer.after(5000, resolve));
         }
-        if (this.watched !== dir) return;
-        if (!failed) {
-          // 目录真变了：清单也得重扫，否则新建的 todo.md 要等一分钟。
-          this.docsStale = true;
-          this.refresh(cx);
-          cx.notify();
-        }
-        // 失败时隔 5 秒再试，成功时 watchFolder 自己会等下一次变化。
-        if (failed) await new Promise((resolve) => cx.timer.after(5000, resolve));
-      }
-    });
+      });
+    }
+    for (const dir of Object.keys(this.watchActive)) {
+      if (!want.includes(dir)) delete this.watchActive[dir];
+    }
   }
 
   // 本机 pi 会话目录一变就重扫本机，不用等 30 秒轮询。远程机器没这能力。
