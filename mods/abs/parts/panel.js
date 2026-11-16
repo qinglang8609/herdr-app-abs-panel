@@ -1015,13 +1015,12 @@ export default class AbsPanel extends View {
       }
       // 跟行格式同一个顺序：时间 → 作者 → 标签 → 会话 id → 状态/结论。
       const meta = [item.date, item.who, ...(item.tags ?? []), item.id, item.state, item.verdict].filter(Boolean);
+      // 正文就是原始行，有内容/子项时排在前面，不再单列「原始行：」那一节。
       const body = [
-        ...(item.note ? [item.note] : []),
-        ...(item.children.length ? ["", "子项：", ...item.children.map((k) => `${kidMark(k)} ${k.text}`)] : []),
-        "",
-        "原始行：",
-        item.line,
-      ];
+        ...(item.note ? [item.note, ""] : []),
+        ...(item.children.length ? ["子项：", ...item.children.map((k) => `${kidMark(k)} ${k.text}`), ""] : []),
+        item.line ?? "",
+      ].filter((x, i, arr) => !(x === "" && arr[i - 1] === ""));
       openOverlay({
         mod: "abs-detail", kind: "dialog", width: 620, height: 460,
         props: { title: item.title, meta, body },
@@ -1046,7 +1045,7 @@ export default class AbsPanel extends View {
       props: {
         title: item.title || item.text.split("\n")[0] || "(空)",
         meta: [item.when, item.who, ...(item.tags ?? []), item.id, item.kind].filter(Boolean),
-        body: item.title ? [(item.text || "(没有正文)"), "", "原始行：", item.line] : item.text.split("\n"),
+        body: item.title ? [item.text || "", "", item.line].filter((x, i, arr) => !(x === "" && arr[i - 1] === "")) : item.text.split("\n"),
       },
     });
   }
