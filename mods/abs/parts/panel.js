@@ -1034,6 +1034,7 @@ export default class AbsPanel extends View {
         mod: "abs-detail", kind: "dialog", width: 640, height: 520,
         props: {
           title: item.title || item.name,
+          markdown: true,
           meta: [`${item.items.length} 条`],
           body: item.items.length
             ? item.items.map((x) => `- [[${x.name}]]${x.about ? " — " + x.about : ""}`)

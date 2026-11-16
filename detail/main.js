@@ -108,8 +108,8 @@ export default class AbsDetail extends View {
           .on_click(() => closeOverlay(props().overlay)).child("×")))
       .when(meta.length > 0, (e) => e.child(h_flex().gap(6).flex_none()
         .children(meta.map((m) => div().px(6).py(1).rounded(4).bg(t.raised).border_1().border_color(t.border).text_size(10.5).text_color(t.muted).child(m)))))
-      .when(!p.input, (e) => e.child(div().flex_1().min_h(0).overflow_y_scrollbar()
-        .child(v_flex().gap(4).w_full().children(p.markdown ? this.markdownRows(body) : body.map((line) => div().child(line || " "))))))
+      .when(!p.input, (e) => e.child(div().flex_1().min_h(0).overflow_y_scrollbar().text_size(12.5).text_color(t.muted)
+        .child(v_flex().gap(4).w_full().children(p.markdown ? this.markdownRows(body) : body.map((line) => div().text_size(12.5).text_color(t.muted).child(line || " "))))))
       .when(Boolean(p.input), (e) => e
         .child(div().id("abs-detail-input").h(36).flex_none().px(10).flex().items_center().rounded(8)
           .border_1().border_color(this.typing ? t.accent : t.border).cursor_text()
