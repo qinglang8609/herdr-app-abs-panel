@@ -1015,8 +1015,11 @@ export default class AbsPanel extends View {
       }
       // 跟行格式同一个顺序：时间 → 作者 → 标签 → 会话 id → 状态/结论。
       const meta = [item.date, item.who, ...(item.tags ?? []), item.id, item.state, item.verdict].filter(Boolean);
-      // 详情正文只放原始行：文件里那一行本身就带全部字段，不再另外复述。
-      const body = [item.line ?? ""];
+      // 详情正文：先父任务那一行原文，再跟着子项（按文件里的缩进和勾选字符写回去）。
+      const body = [
+        item.line ?? "",
+        ...(item.children ?? []).map((k) => `  - [${k.mark || (k.done ? "x" : " ")}] ${k.text}`),
+      ];
       openOverlay({
         mod: "abs-detail", kind: "dialog", width: 620, height: 460,
         props: { title: item.title, meta, body },
