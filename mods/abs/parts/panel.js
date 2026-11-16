@@ -199,6 +199,11 @@ function parseKid(body, parentDone) {
   return rest ? { text: rest, done, mark } : null;
 }
 
+// 行里挂出来的标签：只留短的（会话 id 那种长串留在详情里看），最多 4 个。
+function shortTags(tags) {
+  return (tags ?? []).filter((tag) => String(tag).length <= 12).slice(0, 4);
+}
+
 // 子项前面那个标记：写了哪种就显示哪种，没写就跟着父任务的完成状态。
 function kidMark(kid) {
   if (kid?.mark != null && kid.mark !== "") return `[${kid.mark}]`;
@@ -214,36 +219,25 @@ function kidColor(t, kid) {
 
 // 一条顶层任务。没写 checkbox 时用 fallbackDone（所在分区是不是「已完成」），
 // 没写 `[状态]` 时用 fallbackState（`## 进行中` 这类分区标题）。
-// 方括号里的东西按内容认，不按位置：新标准行是
-//   `- [ ] [标题] [2026-11-16 11:00] [[fanchao]] [01a1c4c6-c75c-…] [任意标签]`
-// 顺序可能乱，但只要三种一定分得清：第一个「不像状态、不像 id、不带日期」的方括号是标题，
-// 带日期的是时间，双括号是作者，像 id 的是 id，剩下的都算标签。
-function scanBrackets(text) {
-  const brackets = [];
-  const authors = [];
-  const plain = [];
-  const re = /\[\[([^\]]+)\]\]|\[([^\[\]]*)\]/g;
-  let m, at = 0;
-  while ((m = re.exec(text))) {
-    const before = text.slice(at, m.index).trim();
-    if (before) plain.push(before);
-    if (m[1] != null) { if (m[1].trim()) authors.push(m[1].trim()); }
-    else if (m[2].trim()) brackets.push(m[2].trim());
-    at = m.index + m[0].length;
+// 只认**行首连续**的方括号字段：`[标题] [时间] [[作者]] [标签] [id]`。
+// 正文里再出现的方括号是文字（代码片段 `[...doing]`、说明里的 `[x]`），不当字段，
+// 否则旧格式的记录会被这些方括号抢走标题。
+function scanFields(text) {
+  const fields = [];
+  let at = 0;
+  for (;;) {
+    const m = /^\s*(\[\[([^\]]+)\]\]|\[([^\[\]]*)\])/.exec(text.slice(at));
+    if (!m) break;
+    if (m[2] != null) fields.push({ kind: "author", text: m[2].trim() });
+    else if (m[3].trim()) fields.push({ kind: "bracket", text: m[3].trim() });
+    at += m[0].length;
   }
-  const after = text.slice(at).trim();
-  if (after) plain.push(after);
-  return { brackets, authors, plain };
+  return { fields, rest: text.slice(at).trim() };
 }
 
 // 方括号里那个词是不是状态：进行中 / 讨论中 / 滞留中 / 搁置 / 已完成 这类。
 function isStateWord(text) {
   return /^(?:.{1,6}中|搁置|暂停|待办|未开始|未完成|已完成|不再做)$/.test(String(text ?? "").trim());
-}
-
-// 方括号里那串是不是会话 id：`01a1c4c6-c75c-7001-…`。
-function looksLikeId(text) {
-  return /^[0-9a-f]{6,}(?:-[0-9a-f]{2,})+$/i.test(String(text ?? "").trim());
 }
 
 // 一条顶层任务。没写 checkbox 时用 fallbackDone（所在分区是不是「已完成」），
@@ -262,15 +256,22 @@ function parseTask(body, fallbackDone, fallbackState) {
   }
   if (!rest) return null;
 
-  const { brackets, authors, plain } = scanBrackets(rest);
+  const { fields, rest: tail } = scanFields(rest);
   let title = "", date = "", id = "", tagState = "";
   const tags = [];
-  for (const text of brackets) {
+  const authors = [];
+  for (const f of fields) {
+    if (f.kind === "author") { authors.push(f.text); continue; }
+    const text = f.text;
     const dt = /\d{4}-\d{2}-\d{2}(?:\s+\d{1,2}:\d{2})?/.exec(text);
     if (dt) { if (!date) date = dt[0]; continue; }
-    if (looksLikeId(text)) { if (!id) id = text; continue; }
-    if (isStateWord(text)) { if (!tagState) tagState = text; continue; }
-    if (!title) { title = text; continue; }
+    // 标题是第一个方括号（旧文件里第一个可能是 `[进行中]` 这种状态词，那只当状态）。
+    if (!title) {
+      if (isStateWord(text)) { if (!tagState) tagState = text; continue; }
+      title = text;
+      continue;
+    }
+    // 除标题、时间、作者之外的一律当标签（会话 id 也是标签）。
     tags.push(text);
   }
   const who = authors.find((a) => !a.startsWith("log-")) ?? "";
@@ -286,29 +287,26 @@ function parseTask(body, fallbackDone, fallbackState) {
       group: done ? "done" : "doing", done, state, id: id || linkId, who,
       box: Boolean(box), linked: Boolean(linkId) || authors.length > 0,
       date: date || parenDate(rest),
-      title, note: plain.join(" — ").trim(), tags,
+      title, note: tail, tags,
       verdict: /【([^】]+)】/.exec(rest)?.[1] ?? "",
       kids: 0, children: [], line: rest,
     };
   }
 
-  // 没有标题方括号：老格式 `id [[作者]] — 标题 — 结语`，照旧读。
-  return parseOldTask(rest, done, state, fallbackState, Boolean(box), date);
+  // 没有标题方括号：老格式 `id [[作者]] — 标题 — 结语`，在去掉行首字段之后的那段上读。
+  return parseOldTask(tail, done, state, fallbackState, Boolean(box), date, linkId);
 }
 
 // 老格式那一套：不再优先，只是留着让旧文件继续能读。
-function parseOldTask(rest, done, state, fallbackState, hasBox, date) {
-  // `[进行中]` 这类行内标签。
+function parseOldTask(rest, done, state, fallbackState, hasBox, date, linkId = "") {
   let body = rest;
-  const st = /^\[([^\[\]]{1,20})\]\s*/.exec(body);
-  if (st && !/^\s*[xX+\-~]?\s*$/.test(st[1]) && isStateWord(st[1])) { state = st[1].trim(); body = body.slice(st[0].length).trim(); }
   if (!state && !done) state = fallbackState || "进行中";
   // `id [[作者]] — 标题 — 结语`：按破折号切成几段。第一段只有 id 和作者时，标题在第二段。
   const segs = body.split(/\s+[—–]\s+/);
   const main = segs[0] ?? "";
   const tail = segs.slice(1);
   const links = [...main.matchAll(/\[\[([^\]]+)\]\]/g)].map((m) => m[1]);
-  let id = "", who = "", title = main;
+  let id = linkId, who = "", title = main;
   if (/^\s*\[\[/.test(main) && links.length) {
     // `- [[log-2026-10-30]] 完成任务 1 条`：方括号里是 id，后面才是说明。
     id = links[0];
@@ -455,45 +453,41 @@ function parseLog(text) {
     const body = line.replace(/^#{1,6}\s+/, "").replace(/^(?:[-*+]|\d+[.)])\s+/, "").trim();
     if (!body) continue;
 
-    // 新标准行跟 todo 一样：`## [2026-11-16 11:00] [[作者]] [标题] [标签]`。
-    // 方括号按内容认、不按顺序；有标题方括号就走新格式，没有就退回老格式。
-    const { brackets, authors, plain } = scanBrackets(body);
+    // 新标准行跟 todo 一样：只看行首连续的方括号字段 `[标题] [时间] [[作者]] [标签]`，
+    // 正文里的方括号（代码片段之类）不当字段。有标题字段就走新格式，没有退回老格式。
+    const { fields, rest: tail } = scanFields(body);
     let when = "", title = "", id = "";
     const tags = [];
-    for (const t of brackets) {
-      const dt = /\d{4}-\d{2}-\d{2}(?:\s+\d{1,2}:\d{2})?/.exec(t);
+    const authors = [];
+    for (const f of fields) {
+      if (f.kind === "author") { authors.push(f.text); continue; }
+      const text = f.text;
+      const dt = /\d{4}-\d{2}-\d{2}(?:\s+\d{1,2}:\d{2})?/.exec(text);
       if (dt) { if (!when) when = dt[0]; continue; }
-      if (looksLikeId(t)) { if (!id) id = t; continue; }
-      if (!title) { title = t; continue; }
-      tags.push(t);
+      if (!title) { title = text; continue; }
+      tags.push(text);
     }
     const who = authors.find((a) => !a.startsWith("log-")) ?? "";
+    // 没有日期字段时，正文里随便写个日期也算（老列表写法）。
+    const looseDate = /(\d{4}-\d{2}-\d{2})(?:[ T](\d{1,2}:\d{2}))?/.exec(body);
+    const whenAny = when || (looseDate ? (looseDate[2] ? `${looseDate[1]} ${looseDate[2]}` : looseDate[1]) : "");
+
     if (title) {
-      out.push({
-        when: when || parenDate(body), who, kind: "", id, tags,
-        title, text: plain.join(" ").trim(), line: body,
-      });
+      out.push({ when: whenAny, who, kind: "", id, tags, title, text: tail, line: body });
       continue;
     }
+    if (!whenAny) continue; // 没有日期的标题只是分节，不是记录
 
-    // 老格式：`## [时间] [[作者]] 类型 | 正文`，没有日期就不是记录。
-    const at = /(\d{4}-\d{2}-\d{2})(?:[ T](\d{1,2}:\d{2}))?/.exec(body);
-    if (!at) continue;
-    let rest = body;
-    const whenOld = at[2] ? `${at[1]} ${at[2]}` : at[1];
-    rest = rest.slice(0, at.index) + " " + rest.slice(at.index + at[0].length);
-    rest = rest.replace(/\[\[[^\]]+\]\]/g, " ").replace(/[[\]【】]/g, " ").replace(/\s+/g, " ").trim();
-    // 时间后面可能跟着 `—` 这类装饰，先剥掉，否则它会被当成「类型」。
-    rest = rest.replace(/^[—–\-|\s]+/, "");
-    // `dev | 正文`：竖线左边是一个词就当类型，否则整段都是正文。
-    let kind = "", text = rest;
-    const bar = rest.indexOf("|");
+    // 老格式：`## [时间] [[作者]] 类型 | 正文`；日期写在正文里时要先删掉它。
+    let text = (when ? tail : tail.replace(looseDate[0], " ")).replace(/^[—–\-|\s]+/, "").replace(/\s+/g, " ").trim();
+    let kind = "";
+    const bar = text.indexOf("|");
     if (bar > 0) {
-      const left = rest.slice(0, bar).trim();
-      if (left && !/\s/.test(left)) { kind = left; text = rest.slice(bar + 1).trim(); }
-      else text = rest.replace(/\|/g, " ").replace(/\s+/g, " ").trim();
+      const left = text.slice(0, bar).trim();
+      if (left && !/\s/.test(left) && !/^[—–\-]+$/.test(left)) { kind = left; text = text.slice(bar + 1).trim(); }
+      else text = text.replace(/\|/g, " ").replace(/\s+/g, " ").trim();
     }
-    out.push({ when: whenOld, who, kind, id: "", tags: [], title: "", text, line: body });
+    out.push({ when: whenAny, who, kind, id: "", tags: [], title: "", text, line: body });
   }
   // 按时间戳排，新的在前。不能只 reverse：log.md 里的行不保证严格追加，
   // 早先的记录可能写在后面，光反转发会把日期搞乱。
@@ -1057,7 +1051,7 @@ export default class AbsPanel extends View {
       .child(h_flex().w_full().gap(6).items_center()
         .when(Boolean(task.date), (e) => e.child(div().flex_none().text_size(FS_META).text_color(t.dim).child(task.date)))
         .when(Boolean(task.who), (e) => e.child(div().flex_none().text_size(FS_META).text_color(t.dim).child(task.who)))
-        .children((task.tags ?? []).slice(0, 4).map((tag) =>
+        .children(shortTags(task.tags).map((tag) =>
           div().flex_none().px(5).py(1).rounded(4).bg(t.chrome).text_size(FS_BADGE).text_color(t.muted).child(tag)))
         .child(div().flex_1()))
       // 子项：在下面按树形列出来，最后一条用 └─。
@@ -1339,7 +1333,7 @@ export default class AbsPanel extends View {
                 .items_center()
                 .child(div().flex_none().text_size(FS_META).text_color(t.dim).child(e.when || ""))
                 .when(Boolean(e.who), (el) => el.child(div().flex_none().text_size(FS_META).text_color(t.dim).child(e.who)))
-                .children((e.tags ?? []).slice(0, 4).map((tag) =>
+                .children(shortTags(e.tags).map((tag) =>
                   div().flex_none().px(5).py(1).rounded(4).bg(t.chrome).text_size(FS_BADGE).text_color(t.muted).child(tag)))
                 .child(div().flex_1()),
             );
