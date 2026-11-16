@@ -988,8 +988,8 @@ export default class AbsPanel extends View {
         this.toggleLog(item.id, this.lastCx);
         return;
       }
-      // 标签（新格式方括号里除标题/时间/作者之外的）也摆在这里，别读完就丢。
-      const meta = [item.state, item.verdict, item.id, item.who, item.date, ...(item.tags ?? [])].filter(Boolean);
+      // 跟行格式同一个顺序：时间 → 作者 → 标签 → 会话 id → 状态/结论。
+      const meta = [item.date, item.who, ...(item.tags ?? []), item.id, item.state, item.verdict].filter(Boolean);
       const body = [
         ...(item.note ? [item.note] : []),
         ...(item.children.length ? ["", "子项：", ...item.children.map((k) => `${kidMark(k)} ${k.text}`)] : []),
@@ -1020,7 +1020,7 @@ export default class AbsPanel extends View {
       mod: "abs-detail", kind: "dialog", width: 640, height: 420,
       props: {
         title: item.title || item.text.split("\n")[0] || "(空)",
-        meta: [item.kind, item.when, item.who, item.id, ...(item.tags ?? [])].filter(Boolean),
+        meta: [item.when, item.who, ...(item.tags ?? []), item.id, item.kind].filter(Boolean),
         body: item.title ? [(item.text || "(没有正文)"), "", "原始行：", item.line] : item.text.split("\n"),
       },
     });
@@ -1044,21 +1044,22 @@ export default class AbsPanel extends View {
       .cursor_pointer()
       .hover((s) => s.bg(t.chrome))
       .on_click(() => this.openDetail("task", task))
-      // 第一行：状态点 + 标题，右侧是状态标签和子项数。
+      // 第一行：状态点 + 标题 + 状态徽章。
       .child(h_flex().gap(6).items_center()
         .child(div().size(6).flex_none().rounded(3).bg(dot))
         .child(div().flex_1().min_w(0).truncate().text_size(FS_ITEM).font_semibold().text_color(t.foreground).child(task.title))
-        .when(Boolean(task.state), (e) => e.child(div().flex_none().px(5).py(1).rounded(4).bg(this.stateBadge(t, task.state)).text_size(FS_BADGE).text_color("#ffffff").child(task.state)))
-        .children((task.tags ?? []).slice(0, 3).map((tag) =>
-          div().flex_none().px(5).py(1).rounded(4).bg(t.chrome).text_size(FS_BADGE).text_color(t.muted).child(tag))))
+        .when(Boolean(task.state), (e) => e.child(div().flex_none().px(5).py(1).rounded(4).bg(this.stateBadge(t, task.state)).text_size(FS_BADGE).text_color("#ffffff").child(task.state))))
       // 第二行：描述，没有就不画这一行
       .when(Boolean(detail), (e) =>
         e.child(div().w_full().min_w(0).truncate().text_size(FS_META).text_color(t.dim).child(detail)),
       )
-      // 第三行：只有日期就画，没有就不占位置。
-      .when(Boolean(task.date), (e) =>
-        e.child(div().w_full().text_size(FS_META).text_color(t.dim).child(task.date)),
-      )
+      // 第三行：时间 → 作者 → 标签，跟文件里的行顺序一致。
+      .child(h_flex().w_full().gap(6).items_center()
+        .when(Boolean(task.date), (e) => e.child(div().flex_none().text_size(FS_META).text_color(t.dim).child(task.date)))
+        .when(Boolean(task.who), (e) => e.child(div().flex_none().text_size(FS_META).text_color(t.dim).child(task.who)))
+        .children((task.tags ?? []).slice(0, 4).map((tag) =>
+          div().flex_none().px(5).py(1).rounded(4).bg(t.chrome).text_size(FS_BADGE).text_color(t.muted).child(tag)))
+        .child(div().flex_1()))
       // 子项：在下面按树形列出来，最后一条用 └─。
       .when(kids.length > 0, (e) =>
         e.child(
@@ -1324,23 +1325,23 @@ export default class AbsPanel extends View {
             .cursor_pointer()
             .hover((el) => el.bg(t.chrome))
             .on_click(() => this.openDetail("entry", e))
-            // 第一行：标题（新格式的标签挂在右边，跟看板一致）
-            .child(h_flex().w_full().gap(5).items_center()
-              .child(div().flex_1().min_w(0).truncate().text_size(FS_ITEM).font_semibold().text_color(t.foreground).child(title))
-              .children((e.tags ?? []).slice(0, 3).map((tag) =>
-                div().flex_none().px(5).py(1).rounded(4).bg(t.chrome).text_size(FS_BADGE).text_color(t.muted).child(tag))))
+            // 第一行：标题
+            .child(div().w_full().min_w(0).truncate().text_size(FS_ITEM).font_semibold().text_color(t.foreground).child(title))
             // 第二行：详情
             .when(Boolean(detail), (el) =>
               el.child(div().w_full().min_w(0).truncate().text_size(FS_META).text_color(t.dim).child(detail)),
             )
-            // 第三行：作者在左，时间在右
+            // 第三行：时间 → 作者 → 标签，跟看板一致。
             .child(
               h_flex()
+                .w_full()
                 .gap(6)
                 .items_center()
-                .child(div().text_size(FS_META).text_color(t.dim).child(e.who || ""))
-                .child(div().flex_1())
-                .child(div().text_size(FS_META).text_color(t.dim).child(e.when)),
+                .child(div().flex_none().text_size(FS_META).text_color(t.dim).child(e.when || ""))
+                .when(Boolean(e.who), (el) => el.child(div().flex_none().text_size(FS_META).text_color(t.dim).child(e.who)))
+                .children((e.tags ?? []).slice(0, 4).map((tag) =>
+                  div().flex_none().px(5).py(1).rounded(4).bg(t.chrome).text_size(FS_BADGE).text_color(t.muted).child(tag)))
+                .child(div().flex_1()),
             );
         })
       : [div().w_full().py(10).text_size(FS_BODY).text_color(t.dim).text_center().child("还没有日志")];
