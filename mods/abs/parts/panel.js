@@ -1,5 +1,5 @@
 // ABS 记忆库面板：把 .brain 的 index / todo / log 读成三块卡片。
-// 目录从当前空间的工作目录往上找 .brain，找不到就用 ~/.brain。
+// 目录只从当前空间的工作目录往下找，不往父目录找，也不用 ~/.brain 兜底。
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { spaces, panes, focused, readTextFile, writeTextFile, watchFolder, exec, hc, theme, home, run, appHome, openOverlay, nextCommand, shared } from "herdr";
@@ -799,7 +799,9 @@ export default class AbsPanel extends View {
   }
 
   // 当前目录下所有 todo.md / log.md / index.md，不分文件夹（不再只认 .brain）。
-  // 当前目录里一份都没找到才往上找两级，再没有就用该机器的 ~/.brain。
+  // 只看当前目录往下：父目录里的文件不算这个项目的，读到会认错成当前项目的内容。
+  // 一份都没找到就返回空，页面显示「这个目录下没有 todo.md」；空结果不进缓存，
+  // 下一轮定时器（本机 30 秒、远程 5 秒）会真去扫一次，所以刚建出来的 .brain 会被发现。
   // 清单缓存 60 秒：30 秒一轮轮询会反复进来，每轮都跑 find 太贵；
   // 本机目录真有变化时 watch() 会把 docsStale 置上，立刻重扫一次。
   async findDocs(at) {
@@ -822,25 +824,15 @@ export default class AbsPanel extends View {
       }
     };
     if (at.dir) {
-      let dir = at.dir.replace(/\/$/, "");
-      for (let i = 0; i < 3 && dir && dir !== "/"; i++) {
-        take(await this.findDocsIn(dir, at.on));
-        if (docs.todo.length || docs.log.length || docs.index.length) break;
-        const cut = dir.lastIndexOf("/");
-        dir = cut <= 0 ? "" : dir.slice(0, cut);
-      }
-    }
-    if (!docs.todo.length && !docs.log.length && !docs.index.length) {
-      const brain = await this.homeBrain(at);
-      if (brain) {
-        // 只收读得到的：文件不存在不算错。三份一起问，别一次等一趟（远程尤其明显）。
-        const names = ["todo", "log", "index"];
-        const texts = await Promise.all(names.map((n) => readTextFile(`${brain}/${n}.md`, { on: at.on }).catch(() => null)));
-        names.forEach((n, i) => { if (texts[i] != null) docs[n].push(`${brain}/${n}.md`); });
-      }
+      const dir = at.dir.replace(/\/$/, "");
+      if (dir) take(await this.findDocsIn(dir, at.on));
     }
     this.docsStale = false;
-    (this.docsCache ??= {})[key] = { docs, at: Date.now() };
+    // 空结果不缓存：仓库现在没有 .brain，不代表一会不会有。
+    // 缓存住空结果的话，新文件要等缓存过期（60 秒）才看得到；
+    // 这时也没有目录可监听，没人会把 docsStale 置上。
+    const empty = !docs.todo.length && !docs.log.length && !docs.index.length;
+    if (!empty) (this.docsCache ??= {})[key] = { docs, at: Date.now() };
     return docs;
   }
 
@@ -850,27 +842,6 @@ export default class AbsPanel extends View {
     const cmd = `find ${q} -maxdepth 5 -type f \\( -iname todo.md -o -iname log.md -o -iname index.md \\) -not -path '*/node_modules/*' -not -path '*/.git/*' 2>/dev/null | head -60`;
     const r = await exec("sh", ["-c", cmd], { on }).catch(() => null);
     return String(r?.stdout ?? "").split("\n").map((s) => s.trim()).filter(Boolean);
-  }
-
-  // 该机器上的 ~/.brain（远程的 HOME 往往不是本地那个，所以去问它自己）。
-  async homeBrain(at) {
-    const on = at.on;
-    let homeDir = home();
-    if (on) {
-      const known = (this.remoteHome ?? {})[on];
-      if (known) {
-        homeDir = known;
-      } else {
-        const r = await exec("sh", ["-c", "exec printf %s \"$HOME\""], { on }).catch(() => null);
-        if (r?.code !== 0 || !r?.stdout.trim()) {
-          this.note = `连不上 ${on}，读不到它上面的 .brain`;
-          return null;
-        }
-        homeDir = r.stdout.trim();
-        (this.remoteHome ??= {})[on] = homeDir;
-      }
-    }
-    return `${homeDir}/.brain`;
   }
 
   // 找到的每份 todo/log/index 所在目录都监听：并起来的东西改了，页面立刻跟着变。
