@@ -89,6 +89,7 @@ export default class Spaces extends View {
     this.shown = new Set(spaces().map((s) => s.id));
     this.born = {};
     this.wasStatus = {}; // address -> 上一次见到的 status
+    this.wasFocused = {}; // address -> 上一次是否聚焦（点进 pane 就清蓝圈）
     this.fresh = {}; // address -> true：刚干完活、还没点开看（圆圈显蓝）
     this.pressed = null;
     this.over = null;
@@ -105,9 +106,9 @@ export default class Spaces extends View {
     // 闲着时不打扰。spins 的动画自己走，不需要这里驱动。
     this.agentKey = this.agentStates();
     cx.timer.every(1000, (cx) => {
-      this.trackAgents();
+      const seen = this.trackAgents();
       const now = this.agentStates();
-      if (now === this.agentKey) return;
+      if (now === this.agentKey && !seen) return;
       this.agentKey = now;
       cx.notify();
     });
@@ -142,6 +143,7 @@ export default class Spaces extends View {
     for (const k of Object.keys(this.checked)) if (!places.has(k)) delete this.checked[k];
     for (const k of [...this.unsure]) if (!places.has(k)) this.unsure.delete(k);
     for (const k of Object.keys(this.wasStatus)) if (!live.has(k)) delete this.wasStatus[k];
+    for (const k of Object.keys(this.wasFocused)) if (!live.has(k)) delete this.wasFocused[k];
     for (const k of Object.keys(this.fresh)) if (!live.has(k)) delete this.fresh[k];
     for (const k of Object.keys(this.busy)) if (!paneIds.has(k)) delete this.busy[k];
   }
@@ -435,6 +437,7 @@ export default class Spaces extends View {
   // core 的 done 一亮就被「看过」转成 idle，所以自己记住：干完活的 agent 留一个蓝圈
   // 直到点开看。又开工（working/blocked）就清掉。
   trackAgents() {
+    let seen = false;
     for (const a of agents() || []) {
       const prev = this.wasStatus[a.address];
       const st = a.status;
@@ -443,8 +446,16 @@ export default class Spaces extends View {
         if (st === "done" || (prev === "working" && st === "idle")) this.fresh[a.address] = true;
         else if (st === "working" || st === "blocked") this.fresh[a.address] = false;
       }
+      // 点进这个 pane 就算看过了：刚干完的蓝圈清掉。只在焦点刚进来时清，
+      // 否则一直聚焦着的 pane 里干完活，蓝圈会立刻被抹掉。
+      if (a.focused && !this.wasFocused[a.address]) {
+        if (this.fresh[a.address]) seen = true;
+        this.fresh[a.address] = false;
+      }
+      this.wasFocused[a.address] = a.focused;
       this.wasStatus[a.address] = st;
     }
+    return seen;
   }
 
   agentDots(t, list) {
