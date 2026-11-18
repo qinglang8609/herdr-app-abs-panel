@@ -90,6 +90,7 @@ export default class Spaces extends View {
     this.born = {};
     this.wasStatus = {}; // address -> 上一次见到的 status
     this.wasFocused = {}; // address -> 上一次是否聚焦（点进 pane 就清蓝圈）
+    this.wasSel = null; // 聚焦终端的选区，变了就当你在这块 pane 里动过鼠标
     this.fresh = {}; // address -> true：刚干完活、还没点开看（圆圈显蓝）
     this.pressed = null;
     this.over = null;
@@ -438,6 +439,11 @@ export default class Spaces extends View {
   // 直到点开看。又开工（working/blocked）就清掉。
   trackAgents() {
     let seen = false;
+    // 点进 pane、或在里面点一下鼠标（选区变了），都算「看过了」。
+    const f = focused();
+    const sel = JSON.stringify(f?.selection ?? null);
+    const selChanged = this.wasSel !== null && sel !== this.wasSel;
+    this.wasSel = sel;
     for (const a of agents() || []) {
       const prev = this.wasStatus[a.address];
       const st = a.status;
@@ -448,10 +454,12 @@ export default class Spaces extends View {
       }
       // 点进这个 pane 就算看过了：刚干完的蓝圈清掉。只在焦点刚进来时清，
       // 否则一直聚焦着的 pane 里干完活，蓝圈会立刻被抹掉。
-      if (a.focused && !this.wasFocused[a.address]) {
+      if (a.focused && (!this.wasFocused[a.address] || selChanged)) {
         if (this.fresh[a.address]) seen = true;
         this.fresh[a.address] = false;
       }
+      // 聚焦变了就重画：切进来要立刻熄灭，切走要立刻亮。
+      if (this.wasFocused[a.address] !== a.focused) seen = true;
       this.wasFocused[a.address] = a.focused;
       this.wasStatus[a.address] = st;
     }
