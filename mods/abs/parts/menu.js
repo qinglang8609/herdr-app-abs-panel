@@ -5,8 +5,8 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { run, props, closeOverlay, openOverlay, theme, keys, terminals, spaces, panes } from "herdr";
-import { checkout } from "./lib.js";
+import { run, props, closeOverlay, openOverlay, theme, keys, terminals, spaces, panes, exec, notify, window as win } from "herdr";
+import { checkout, openFolder } from "./lib.js";
 
 // Where a space is now: its first terminal's live folder, else where it was made.
 function place(s) {
@@ -46,14 +46,21 @@ function items(p, git) {
         ["New tab", "tab.new", { space: tg.space }],
         ["Close", "tab.close", { id: tg.id }],
       ];
-    case "space":
+    case "space": {
+      const sp = spaces().find((s) => s.id === tg.id);
+      const dir = place(sp);
+      // 文件窗口只会打开本机的 Finder/Explorer，远程路径点了没用，不显示。
       return [
         ["Change icon", "space.icon", { id: tg.id }],
         ["Rename", "space.rename", { id: tg.id }],
+        ["Open in VS Code", "open.editor", { app: "vscode", dir, on: sp?.machine }],
+        ["Open in Zed", "open.editor", { app: "zed", dir, on: sp?.machine }],
+        ...(!sp?.machine && dir ? [["文件窗口", "open.finder", { dir }]] : []),
         ...(git ? [["New worktree", "worktree", { space: tg.id, action: "new" }], ["Open worktree", "worktree", { space: tg.id, action: "open" }]] : []),
         ...(git === "worktree" ? [["Remove worktree", "worktree", { space: tg.id, action: "remove" }]] : []),
         ["Close", "space.close", { id: tg.id }],
       ];
+    }
     default:
       return [
         ["New space", "space.new", {}],
@@ -67,6 +74,8 @@ function items(p, git) {
 }
 
 function menuIcon(command) {
+  if (command === "open.editor") return "mods/abs/icons/code-xml.svg";
+  if (command === "open.finder") return "mods/abs/icons/folder-open.svg";
   const name = command.endsWith(".close") ? "x" : command.endsWith(".rename") ? "square-pen" : command.endsWith(".new") ? "plus" : command === "worktree" ? "git-branch" : command === "app.help" ? "terminal" : command === "space.icon" ? "square" : command === "app.theme" ? "settings" : command === "pane.split" ? "panel-right" : command === "pane.zoom" ? "square" : "terminal";
   return `mods/workspace-chrome/${name}.svg`;
 }
@@ -101,6 +110,15 @@ export default class Menu extends View {
     closeOverlay(props()?.overlay);
     if (it[1] === "worktree") openOverlay({ mod: "worktree", kind: "dialog", ...(it[2].action === "open" ? { width: 560, height: 480 } : { width: 440, height: 260 }), props: it[2] });
     else if (it[1] === "space.icon") openOverlay({ mod: "abs", kind: "popup", width: 210, props: { ...it[2], part: "space-icon" } });
+    else if (it[1] === "open.editor") openFolder(it[2].app, it[2].dir, it[2].on);
+    else if (it[1] === "open.finder") {
+      const on = it[2].on;
+      exec("open", [it[2].dir], on ? { on } : undefined).catch((err) => notify({
+        title: "Couldn't open 文件窗口",
+        body: String(err && (err.stderr || err.message || err)).split("\n")[0] || "Is it installed?",
+        level: "error",
+      }));
+    }
     else run(it[1], it[2]);
   }
 
@@ -126,7 +144,7 @@ export default class Menu extends View {
       .children(
         list.map((it, i) =>
           v_flex()
-            .when(i > 0 && (it[1].endsWith(".close") || it[1] === "app.help" || (it[1] === "app.theme" && list[i - 1][1] !== "app.theme")), el => el.child(div().mx(7).my(4).h(1).bg(t.border)))
+            .when(i > 0 && (it[1].endsWith(".close") || it[1] === "app.help" || it[1] === "open.editor" || it[1] === "worktree" || (it[1] === "app.theme" && list[i - 1][1] !== "app.theme")), el => el.child(div().mx(7).my(4).h(1).bg(t.border)))
             .child(h_flex()
             .id(`mi-${i}`)
             .h(31)

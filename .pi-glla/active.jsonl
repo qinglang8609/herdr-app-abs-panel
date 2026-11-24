@@ -1,0 +1,5 @@
+{"type":"session_rebound","value":{"reason":"startup"},"at":"2026-11-07T08:35:35.463Z"}
+{"type":"session_waiting_for_load","value":{"reason":"startup"},"at":"2026-11-07T08:35:35.467Z"}
+{"type":"state","value":{"goal":null,"list":[],"loop":null,"mainModelRecovery":null,"lastModelRef":"agent2api/deepseek-v4.1-flash","lastCompactionAt":null,"postCompactRecovery":null,"supervisorPausedAt":null,"loadHoldAt":null,"lastOutcome":null},"at":"2026-11-07T08:35:38.494Z"}
+{"type":"context_usage_sample","value":{"goalId":null,"provider":"agent2api","model":"deepseek-v4.1-flash","providerUsage":{"inputTokens":571,"outputTokens":139,"cacheReadTokens":23424,"cacheWriteTokens":0,"totalTokens":24134},"contextUsage":{"tokens":24134,"contextWindow":1000000,"percent":2.4133999999999998}},"at":"2026-11-07T08:35:51.672Z"}
+{"type":"session_shutdown","value":{"reason":"quit"},"at":"2026-11-07T08:35:55.941Z"}

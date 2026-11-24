@@ -3,7 +3,7 @@
 // and the light/dark switch.
 
 import { svg, image } from "gpui-kit";
-import { spaces, panes, agents, focused, layout, appHome, readTextFile, writeTextFile, exec, notify } from "herdr";
+import { spaces, panes, agents, focused, layout, appHome, readTextFile, writeTextFile, exec, notify, setShared, window as win } from "herdr";
 
 export const MOD = "abs";
 export const icon = (name) => `mods/${MOD}/icons/${name}.svg`;
@@ -134,6 +134,50 @@ export async function checkout(cwd, on) {
   const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on }).catch(() => ({ code: 1 }));
   if (common.code !== 0 || top.code !== 0) return null;
   return common.stdout.trim() === `${top.stdout.trim()}/.git` ? "local" : "worktree";
+}
+
+// Open a folder in VS Code / Zed / the system file window. Remote spaces go
+// through ssh (the Host name comes from ~/.ssh/config, case-insensitive).
+export async function openFolder(choice, dir, on) {
+  if (!dir) return;
+  const platform = win()?.platform;
+  const list = platform === "macos"
+    ? [
+      ["vscode", "VS Code", "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"],
+      ["zed", "Zed", "/Applications/Zed.app/Contents/MacOS/cli"],
+      ["files", "文件窗口", "open"],
+    ]
+    : platform === "windows"
+      ? [
+        ["vscode", "VS Code", "code"],
+        ["zed", "Zed", "zed"],
+        ["files", "文件窗口", "explorer.exe"],
+      ]
+      : [
+        ["vscode", "VS Code", "code"],
+        ["zed", "Zed", "zed"],
+        ["files", "文件窗口", "xdg-open"],
+      ];
+  const e = list.find((x) => x[0] === choice) ?? list[0];
+  if (choice !== "files") setShared("studio.editor", e[0]);
+  const fail = (err) => notify({
+    title: `Couldn't open ${e[1]}${on ? ` on ${on}` : ""}`,
+    body: String(err && (err.stderr || err.message || err)).split("\n")[0] || "Is it installed?",
+    level: "error",
+  });
+  if (e[0] === "files") {
+    exec(e[2], [dir], on ? { on } : undefined).catch(fail);
+    return;
+  }
+  const bin = e[2];
+  const script = e[0] === "zed"
+    ? `host=$(awk -v k='${String(on ?? "").replace(/'/g, "")}' 'tolower($1)=="host"{for(i=2;i<=NF;i++) if(tolower($i)==k){print $i; exit}}' "$HOME/.ssh/config" 2>/dev/null); exec "${bin}" "ssh://\${host:-${on}}'${dir}'"`
+    : `host=$(awk -v k='${String(on ?? "").replace(/'/g, "")}' 'tolower($1)=="host"{for(i=2;i<=NF;i++) if(tolower($i)==k){print $i; exit}}' "$HOME/.ssh/config" 2>/dev/null); exec "${bin}" --remote "ssh-remote+\${host:-${on}}" '${dir}'`;
+  if (!on) {
+    exec(bin, [dir]).catch(fail);
+    return;
+  }
+  exec("sh", ["-c", script]).catch(fail);
 }
 
 // ---- Light and dark ------------------------------------------------------

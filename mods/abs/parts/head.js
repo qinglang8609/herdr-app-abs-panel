@@ -10,8 +10,8 @@
 
 import { div, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { run, theme, shared, setShared, openOverlay, closeOverlay, exec, notify, nextCommand, props, hc, home, readTextFile, window as win } from "herdr";
-import { icon, own, activeSpace, activeTab, lead, machineOf, isShown, toggleReview, toggleTerminal, terminalDrawer, diffStat } from "./lib.js";
+import { run, theme, shared, setShared, openOverlay, closeOverlay, exec, notify, nextCommand, props, hc, home, readTextFile, window as win, layout } from "herdr";
+import { icon, own, activeSpace, activeTab, lead, machineOf, findNode, isShown, toggleReview, toggleTerminal, terminalDrawer, diffStat, openFolder } from "./lib.js";
 import { threadTitle, projectName } from "./side.js";
 
 // Where Open can send a folder, per platform: [id, label, program, args].
@@ -62,29 +62,8 @@ function ensureBrain() {
 
 async function openIn(choice) {
   const { dir, on } = where();
-  if (!dir) return;
-  const e = editors(win()?.platform, dir).find((x) => x[0] === choice) ?? editors(win()?.platform, dir)[0];
-  setShared("studio.editor", e[0]);
-  const fail = (err) => notify({
-    title: `Couldn't open ${e[1]}${on ? ` on ${on}` : ""}`,
-    body: String(err && (err.stderr || err.message || err)).split("\n")[0] || "Is it installed?",
-    level: "error",
-  });
-  const bin = choice === "zed"
-    ? "/Applications/Zed.app/Contents/MacOS/cli"
-    : "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code";
-  // 一条 sh 干完：在 ~/.ssh/config 里大小写无关地找真名（macos → MACOS），
-  // 找不到就用原名，然后开编辑器。全程一次 exec，不在回调里等任何 Promise。
-  const script = choice === "zed"
-    ? `host=$(awk -v k='${String(on ?? "").replace(/'/g, "")}' 'tolower($1)=="host"{for(i=2;i<=NF;i++) if(tolower($i)==k){print $i; exit}}' "$HOME/.ssh/config" 2>/dev/null); exec "${bin}" "ssh://\${host:-${on}}"'${dir}'`
-    : `host=$(awk -v k='${String(on ?? "").replace(/'/g, "")}' 'tolower($1)=="host"{for(i=2;i<=NF;i++) if(tolower($i)==k){print $i; exit}}' "$HOME/.ssh/config" 2>/dev/null); exec "${bin}" --remote "ssh-remote+\${host:-${on}}" '${dir}'`;
-  if (!on) {
-    exec(bin, [dir]).catch(fail);
-    return;
-  }
-  exec("sh", ["-c", script]).catch(fail);
+  return openFolder(choice, dir, on);
 }
-
 function button(t, id, children, onClick, { tip, framed = true, on = false, hoverBg = true } = {}) {
   return own(
     h_flex()
@@ -152,7 +131,8 @@ export class Header {
     const mac = w.platform === "macos" && !w.fullscreen;
     const editor = editors(w.platform, dir ?? "").find((e) => e[0] === shared("studio.editor")) ?? editors(w.platform, dir ?? "")[0];
     const reviewOpen = isShown("review");
-    const portsActive = reviewOpen && (shared("abs.view") ?? "sessions") === "ports";
+    const reviewActive = findNode(layout(), "review-body")?.active ?? "abs";
+    const portsActive = reviewOpen && reviewActive === "abs" && (shared("abs.view") ?? "sessions") === "ports";
 
     return h_flex()
       .size_full()
@@ -224,15 +204,6 @@ export class Header {
           }, { tip: "Review and commit" }),
         ),
       )
-      .child(
-        button(
-          t,
-          "sh-quick",
-          [svg(icon("code-xml")).size(15)],
-          () => openOverlay({ mod: "abs", kind: "popup", width: 180, props: { part: "quick-open" } }),
-          { framed: false, tip: "Open" },
-        ),
-      )
       // 端口转发：只在当前是远程项目（on 非空）时显示，点开是右侧面板的 ports 页。
       .when(Boolean(on), (el) => el.child(
         button(
@@ -243,6 +214,7 @@ export class Header {
             if (portsActive) run("layout.hide", { id: "review" });
             else {
               setShared("abs.view", "ports");
+              run("layout.select", { stack: "review-body", child: "abs" });
               if (!reviewOpen) run("layout.show", { id: "review" });
             }
           },
@@ -256,7 +228,7 @@ export class Header {
           ["index", "graph", "图谱"],
           ["log", "log", "日志"],
         ].map(([id, glyph, tip]) => {
-          const on = reviewOpen && (shared("abs.view") ?? "sessions") === id;
+          const on = reviewOpen && (shared("abs.view") ?? "sessions") === id && reviewActive === "abs";
           return button(
             t,
             `sh-kb-${id}`,
@@ -266,9 +238,26 @@ export class Header {
               else {
                 ensureBrain();
                 setShared("abs.view", id);
+                run("layout.select", { stack: "review-body", child: "abs" });
                 if (!reviewOpen) run("layout.show", { id: "review" });
               }
             },
+            { framed: false, on, hoverBg: false, tip: on ? `收起${tip}` : tip },
+          );
+        }),
+      )
+      .child(div().w(1).h(16).bg(t.border).flex_none())
+      .children(
+        [
+          ["files", "folder", "文件"],
+          ["changes", "git-compare", "Git"],
+        ].map(([id, glyph, tip]) => {
+          const on = reviewOpen && reviewActive === id;
+          return button(
+            t,
+            `sh-panel-${id}`,
+            [svg(icon(glyph)).size(15)],
+            () => toggleReview(run, id),
             { framed: false, on, hoverBg: false, tip: on ? `收起${tip}` : tip },
           );
         }),
