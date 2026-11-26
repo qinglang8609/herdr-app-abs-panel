@@ -627,6 +627,8 @@ class ChangesPanel extends View {
       for (let i = 0; i < rows.length; i++) {
         for (const cv of rows[i].curves) {
           if (cv.kind === "in") continue;
+          // join 的目标列是主干，它要继续直下，不能跳；只有 out 的新分支列才跳。
+          if (cv.kind !== "out") continue;
           let target = i + 1;
           while (target < rows.length && rows[target].col !== cv.to) target++;
           const end = Math.min(target, rows.length - 1);
@@ -653,7 +655,8 @@ class ChangesPanel extends View {
         }
         // 曲线：out/join 从节点往下弯，in 从上方弯进节点
         for (const cv of r.curves) {
-          const color = LANE[(cv.kind === "in" ? cv.from : cv.to) % LANE.length];
+          // out：新分支的颜色（目标列）；join/in：汇入方自己的颜色（起点列）
+          const color = LANE[(cv.kind === "out" ? cv.to : cv.from) % LANE.length];
           if (cv.kind === "in") {
             // 别的泳道从上方汇入本节点
             const yFrom = yTop;
@@ -674,11 +677,12 @@ class ChangesPanel extends View {
             const yTo = (target < rows.length ? yMidOf(target) : yBot) - NODE_GAP;
             const dy = Math.max(yTo - yFrom, ROW_H * 0.8);
             const dir = cv.to > cv.from ? 1 : -1;
+            // 两端切线垂直、横向位移集中在中段：往右是 }，往左是 {。
             paths.push({ path: PathBuilder.stroke(1.6)
-              .move_to(xOf(cv.from) + dir * 4, yFrom - 2)
+              .move_to(xOf(cv.from), yFrom)
               .cubic_bezier_to(xOf(cv.to), yFrom + dy,
-                xOf(cv.from) + dir * 6, yFrom + dy * 0.45,
-                xOf(cv.to), yFrom + dy * 0.55)
+                xOf(cv.from), yFrom + dy * 0.5,
+                xOf(cv.to), yFrom + dy * 0.5)
               .build(), color });
           }
         }
