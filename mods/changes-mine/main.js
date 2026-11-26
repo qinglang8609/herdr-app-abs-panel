@@ -491,7 +491,10 @@ class ChangesPanel extends View {
 
   fileRow(f, t) {
     const parts = f.path.split("/"), name = parts.pop();
-    const dir = parts.length ? `${parts.join("/")}/` : "";
+    // 目录只留最后两级并前置省略号：mods/abs/parts/ -> …/abs/parts/
+    // 原来整条路径靠 truncate 从尾部砍，窄面板里变成 mo... 完全看不出是哪。
+    const tail = parts.slice(-2);
+    const dir = parts.length ? `${parts.length > 2 ? "…/" : ""}${tail.join("/")}/` : "";
     const confirming = this.confirmDiscard === f.path;
     const mini = (id, glyph, tone, tip, fn) =>
       h_flex().id(id).size(20).flex_none().items_center().justify_center().rounded(5)
@@ -503,10 +506,10 @@ class ChangesPanel extends View {
       .cursor_pointer().hover((s) => s.bg(t.hover))
       .on_click(() => this.openDiff(f))
       .child(div().w(10).flex_none().text_size(11).text_color(f.status === "A" ? t.ansi2 : f.status === "D" || f.status === "U" ? t.ansi1 : t.blocked).child(f.status))
-      // 目录从左边截断，文件名始终完整显示。
-      .when(Boolean(dir), (e) => e.child(div().flex_1().min_w(0).truncate().text_right().text_color(t.dim).child(dir)))
-      .child(div().flex_none().max_w(140).truncate().child(name))
-      .child(div().flex_1().min_w(0))
+      // 文件名优先完整；目录可压缩，两者合起来占满左侧剩余宽度。
+      .child(div().flex_none().max_w(150).truncate().child(name))
+      .when(Boolean(dir), (e) => e.child(div().flex_1().min_w(0).truncate().text_size(10.5).text_color(t.dim).child(dir)))
+      .child(div().flex_none().w(2))
       .when(f.add > 0, (e) => e.child(div().flex_none().text_size(10).text_color(t.ansi2).child(`+${f.add}`)))
       .when(f.del > 0, (e) => e.child(div().flex_none().text_size(10).text_color(t.ansi1).child(`−${f.del}`)))
       .when(!f.staged && !f.fresh, (e) => e.child(confirming
@@ -683,9 +686,9 @@ class ChangesPanel extends View {
           .child(div().w(graphW + 6).flex_none())
           .child(h_flex().flex_1().min_w(0).gap(6).items_center()
             .child(div().min_w(0).truncate().text_size(11.5).text_color(t.foreground).child(r.subject || "(无标题)"))
-            .when(Boolean(r.author), (x) => x.child(div().flex_none().max_w(64).truncate()
+            .when(Boolean(r.author), (x) => x.child(div().flex_none().max_w(60).truncate()
               .text_size(10).text_color(t.dim).child(r.author))))
-          .when(Boolean(r.branch) && r.head, (x) => x.child(div().flex_none().max_w(80).truncate()
+          .when(Boolean(r.branch) && r.head, (x) => x.child(div().flex_none().pl(6).max_w(80).truncate()
             .text_size(9.5).text_color(color).child(r.branch)));
       });
 
