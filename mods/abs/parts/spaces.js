@@ -142,6 +142,7 @@ export default class Spaces extends View {
     for (const k of Object.keys(this.at)) if (!spaceIds.has(k)) delete this.at[k];
     for (const k of Object.keys(this.git)) if (!places.has(k)) delete this.git[k];
     for (const k of Object.keys(this.checked)) if (!places.has(k)) delete this.checked[k];
+    for (const k of Object.keys(this.repoGeo ?? {})) if (!places.has(k)) delete this.repoGeo[k];
     for (const k of [...this.unsure]) if (!places.has(k)) this.unsure.delete(k);
     for (const k of Object.keys(this.wasStatus)) if (!live.has(k)) delete this.wasStatus[k];
     for (const k of Object.keys(this.wasFocused)) if (!live.has(k)) delete this.wasFocused[k];
@@ -261,7 +262,7 @@ export default class Spaces extends View {
       while (this.pending.size) {
         const keys = [...this.pending];
         this.pending.clear();
-        for (const key of keys) await this.check(key, cx);
+        await Promise.all(keys.map((key) => this.check(key, cx)));
       }
       const used = new Set(Object.values(this.git).filter(Boolean).map((g) => JSON.parse(g.repo)).filter(([on]) => !on).map(([, repo]) => repo));
       for (const repo of this.watching) if (!used.has(repo)) this.watching.delete(repo);
@@ -282,15 +283,28 @@ export default class Spaces extends View {
       if (r.code !== 0) {
         // Only git's own "no" is remembered as no repo; anything else is asked again.
         if (!/not a git repository/i.test(r.stderr)) this.unsure.add(key);
+        delete this.repoGeo?.[key];   // 目录可能换了内容，下次重新问
         this.git[key] = null;
         return;
       }
-      // The repo's own .git folder names it; a worktree's top differs from it.
-      const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on });
-      const common = await exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd, on });
-      const repo = common.stdout.trim();
-      const name = repo.endsWith("/.git") ? base(repo.slice(0, -5)) : base(repo).replace(/\.git$/, "");
-      const info = { name, branch: null, ahead: 0, behind: 0, repo: JSON.stringify([on, repo]), linked: repo !== `${top.stdout.trim()}/.git` };
+      // 仓库根 / git 目录按 key 缓存：key 里就含 cwd，同一个目录这两个值不会变，
+      // 没必要每轮再起两个 git 进程（原来每个目录每轮 3 个进程，现在常态 1 个）。
+      let geo = (this.repoGeo ??= {})[key];
+      if (!geo) {
+        const [top, common] = await Promise.all([
+          exec("git", ["rev-parse", "--show-toplevel"], { cwd, on }),
+          exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd, on }),
+        ]);
+        const repo = common.stdout.trim();
+        geo = {
+          repo,
+          name: repo.endsWith("/.git") ? base(repo.slice(0, -5)) : base(repo).replace(/\.git$/, ""),
+          linked: repo !== `${top.stdout.trim()}/.git`,
+        };
+        this.repoGeo[key] = geo;
+      }
+      const repo = geo.repo;
+      const info = { name: geo.name, branch: null, ahead: 0, behind: 0, repo: JSON.stringify([on, repo]), linked: geo.linked };
       for (const line of r.stdout.split("\n")) {
         if (line.startsWith("# branch.head ")) info.branch = line.slice(14);
         else if (line.startsWith("# branch.ab ")) {
