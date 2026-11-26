@@ -36,10 +36,6 @@ if [ -f "$HOME_DIR/layouts/abs.json" ]; then
 fi
 cp -f "$SRC/layouts/abs.json" "$HOME_DIR/layouts/abs.json"
 
-# abs-stats：在 abs 基础上多一个用量统计块，并把内置 files / changes 换成
-# 自己那两份（内置的每次启动被 app 重置，改不动行为）。从刚写回的 abs.json 现生成。
-sh "$SRC/sync-layout.sh" >/dev/null
-
 # agent2api 的面板凭据：没配置文件才生成模板，已有的不动。
 if [ ! -f "$HOME_DIR/agent2api.json" ]; then
   cp "$SRC/agent2api.example.json" "$HOME_DIR/agent2api.json"
@@ -47,10 +43,10 @@ if [ ! -f "$HOME_DIR/agent2api.json" ]; then
   echo "已生成 $HOME_DIR/agent2api.json —— 把面板地址和账号密码填进去。"
 fi
 
-# 切到带统计块的那份布局（sync-layout.sh 已经切过一次，这里再确保一下）。
-# 用 app 自己的命令，不直改 shared.json：那个文件 app 也在写，两边同时写会互相覆盖。
+# 切到 abs 布局。用 app 自己的命令，不直改 shared.json：
+# 那个文件 app 也在写，两边同时写会互相覆盖。
 if command -v herdr-app >/dev/null 2>&1; then
-  herdr-app do layout.switch --name abs-stats >/dev/null 2>&1 || true
+  herdr-app do layout.switch --name abs >/dev/null 2>&1 || true
 fi
 
-echo "装好了：abs / agent2api / changes-mine / files-mine + abs-stats 布局。重启 herdr-app 生效。"
+echo "装好了：abs / agent2api / changes-mine / files-mine，布局 abs。重启 herdr-app 生效。"

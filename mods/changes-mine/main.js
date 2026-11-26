@@ -6,7 +6,7 @@
 // 布局里替换掉它（见 herdr-agent2api/sync-layout.sh 的 RENAMED 表）。
 import { View, div, svg, PathBuilder } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, theme, settings, window as winInfo, props, openOverlay, closeOverlay } from "herdr";
+import { spaces, panes, focused, exec, readTextFile, theme, settings, window as winInfo, props, openOverlay, closeOverlay, shared, setShared } from "herdr";
 
 const MAX_REPOS = 16;
 const LOG_LIMIT = 30;
@@ -323,10 +323,13 @@ class DiffViewer {
 class ChangesPanel extends View {
   init(_props, cx) {
     this.repos = [];
-    this.currentRoot = null;
+    // 每个工作目录各记自己上次选的仓库；高度是全局的。
+    this.currentRoot = null;   // refresh 里按当前目录取
     this.message = "";
     this.log = []; this.branches = [];
     this.picker = null;
+    this.gitH = shared("changes.gitH") ?? null;   // 拖过的高度；null = 默认 12 条
+    this.dragging = false;
     this.confirmDiscard = null;
     this.note = null;
     this.loading = false; this.busy = false;
@@ -365,8 +368,10 @@ class ChangesPanel extends View {
     if (this.loading || this.busy) return;
     const { cwd, on } = location(), next = key();
     if (next !== this.contextKey) {
+      this.repoKey = `changes.repo.${cwd ?? ""}`;
+      this.currentRoot = shared(this.repoKey) ?? null;
       this.contextKey = next;
-      this.repos = []; this.currentRoot = null;
+      this.repos = [];
       this.log = []; this.branches = []; this.picker = null; this.confirmDiscard = null;
     }
     this.pollAt = Date.now() + (on ? POLL_REMOTE : POLL_LOCAL);
@@ -379,7 +384,10 @@ class ChangesPanel extends View {
         for (const root of roots) scanned.push(await scanRepo(root, on));
         if (this.contextKey !== next) return;
         this.repos = scanned;
-        if (!scanned.some((r) => r.root === this.currentRoot)) this.currentRoot = scanned[0]?.root ?? null;
+        // 记住的仓库还在这个目录里就用它，否则退回第一个（记忆不清，换回来还在）。
+        if (!scanned.some((r) => r.root === this.currentRoot)) {
+          this.currentRoot = scanned[0]?.root ?? null;
+        }
         await this.loadCurrent();
       } catch (e) {
         if (this.contextKey === next) this.note = String(e).slice(0, 140);
@@ -419,6 +427,9 @@ class ChangesPanel extends View {
   }
 
   stage(path, cx) { this.run(cx, ["add", "--", path]); }
+  // 全部暂存 / 全部取消暂存：一条命令搞定，不逐个文件跑。
+  stageAll(cx) { this.run(cx, ["add", "-A"]); }
+  unstageAll(cx) { this.run(cx, ["reset"]); }
   unstage(path, cx) { this.run(cx, ["restore", "--staged", "--", path]); }
 
   // 丢弃：点一次变红「确定?」，再点才执行；未跟踪的新文件不给，那等于删文件。
@@ -450,13 +461,17 @@ class ChangesPanel extends View {
   switchBranch(name, cx) {
     this.picker = null;
     if (this.repo?.branch === name) { cx.notify(); return; }
-    this.run(cx, ["switch", name]);
+    // git switch 会改仓库 HEAD，下一轮扫描自然读到新分支；失败时 run 会显示 git 原话。
+    this.run(cx, ["switch", name], () => {
+      if (this.repo) this.repo.branch = name;   // 立刻反映到界面，不等下一轮
+    });
   }
 
   switchRepo(root, cx) {
     this.picker = null;
     if (this.currentRoot === root) { cx.notify(); return; }
     this.currentRoot = root;
+    if (this.repoKey) setShared(this.repoKey, root);
     cx.notify();
     cx.spawn(async (cx) => { await this.loadCurrent(); cx.notify(); });
   }
@@ -504,7 +519,8 @@ class ChangesPanel extends View {
         (cx) => (f.staged ? this.unstage(f.path, cx) : this.stage(f.path, cx))));
   }
 
-  section(title, list, t) {
+  // bulk: { icon, tip, fn } —— 分段标题右侧的批量操作（全部暂存 / 全部取消暂存）
+  section(title, list, t, bulk = null) {
     if (!list.length) return [];
     const add = list.reduce((n, f) => n + (f.add || 0), 0), del = list.reduce((n, f) => n + (f.del || 0), 0);
     return [
@@ -513,7 +529,13 @@ class ChangesPanel extends View {
         .child(div().flex_none().text_size(10).text_color(t.dim).child(String(list.length)))
         .child(div().flex_1())
         .when(add > 0, (e) => e.child(div().flex_none().text_size(10).text_color(t.ansi2).child(`+${add}`)))
-        .when(del > 0, (e) => e.child(div().flex_none().text_size(10).text_color(t.ansi1).child(`−${del}`))),
+        .when(del > 0, (e) => e.child(div().flex_none().text_size(10).text_color(t.ansi1).child(`−${del}`)))
+        .when(Boolean(bulk), (e) => e.child(
+          h_flex().id(`bulk-${title}`).size(20).flex_none().items_center().justify_center().rounded(5)
+            .cursor_pointer().hover((x) => x.bg(t.hover))
+            .tooltip(bulk.tip)
+            .on_click((_e, cx) => { cx.stop_propagation(); bulk.fn(cx); })
+            .child(ICONS(bulk.icon, bulk.icon === "plus" ? t.ansi2 : t.dim, 12)))),
       ...list.map((f) => this.fileRow(f, t)),
     ];
   }
@@ -642,8 +664,9 @@ class ChangesPanel extends View {
             .build(), color });
         }
       }
+      // 拖动中跳过画线：几十条 paint_path 是这块最贵的开销，松手后立刻补上。
       const canvas = div().absolute().left(0).top(0).w(graphW).h(rows.length * ROW_H)
-        .children(paths.map((p) => window.paint_path(p.path, p.color)));
+        .when(!this.dragging, (e) => e.children(paths.map((p) => window.paint_path(p.path, p.color))));
 
       const lines = rows.map((r, i) => {
         const color = LANE[r.col % LANE.length];
@@ -671,7 +694,29 @@ class ChangesPanel extends View {
         .child(v_flex().w_full().children(lines)));
     }
 
-    return v_flex().id("changes-mine").size_full().min_h(0).w_full().rounded(10).overflow_hidden().bg(t.background)
+    // 拖动中铺一层透明捕获层：拖动条会跟着 Git 区移动，只有覆盖整块才能持续收到 move。
+    const dragCatcher = this.dragging
+      ? div().id("git-drag-catch").absolute().inset_0().cursor_row_resize()
+          .on_mouse_move((e, cx) => {
+            if (e.pressed_button !== "left") { this.dragging = false; cx.notify(); return; }
+            const dy = this.dragY - e.position.y;      // 往上拖为正 -> 变高
+            const next = Math.max(90, Math.min(900, this.dragH + dy));
+            if (Math.abs(next - (this.gitH ?? 0)) < 2) return;   // 抖动不到 2px 不重绘
+            this.gitH = next;
+            // 节流：整块面板重绘一次很贵，拖动时最多每 40ms 刷一次。
+            const now = Date.now();
+            if (now - (this.dragPaint ?? 0) < 40) return;
+            this.dragPaint = now;
+            cx.notify();
+          })
+          .on_mouse_up("left", (_e, cx) => {
+            this.dragging = false;
+            if (this.gitH != null) setShared("changes.gitH", Math.round(this.gitH));
+            cx.notify();
+          })
+      : null;
+
+    return v_flex().id("changes-mine").size_full().min_h(0).w_full().relative().rounded(10).overflow_hidden().bg(t.background)
       .border_1().border_color(t.border).text_color(t.foreground).text_size(13).track_focus(this.handle)
       .on_key_down((e, cx) => {
         if (e.key === "escape" && this.typing) { this.typing = false; this.handle.focus(); cx.stop_propagation(); cx.notify(); }
@@ -681,19 +726,15 @@ class ChangesPanel extends View {
         .child(div().flex_none().text_size(12.5).font_semibold().child("Changes"))
         .when(Boolean(tracking), (e) => e.child(div().flex_none().text_size(10).text_color(t.accent).child(tracking)))
         .child(div().flex_1().min_w(4))
-        .child(iconButton("pull", t, { name: "arrow-down", ghost: true, on: Boolean(repo) && !this.busy, tip: "拉取（--ff-only）", fn: (cx) => this.pull(cx) }))
+        .child(iconButton("pull", t, { name: "arrow-down", ghost: true, on: Boolean(repo) && !this.busy, tip: "拉取", fn: (cx) => this.pull(cx) }))
         .child(iconButton("push", t, { name: "arrow-up", ghost: true, on: Boolean(repo) && !this.busy, tip: "推送", fn: (cx) => this.push(cx) })))
       // 提交：AI 生成和提交两个按钮都内嵌在输入框右端
       .child(div().flex_none().w_full()
         .child(div().relative().w_full().h(38)
-          .child(div().id("commit-message").w_full().h_full().pl(10).pr(62).flex().items_center()
+          .child(div().id("commit-message").w_full().h_full().pl(10).pr(34).flex().items_center()
             .border_b(1).border_color(this.typing ? t.accent : t.border).cursor_text()
             .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
             .child(Input.new(this.input).h_full().text_size(12).text_color(t.foreground)))
-          .child(h_flex().id("ai-message").absolute().right(32).top(7).size(24)
-            .items_center().justify_center().rounded(5).bg(t.background)
-            .tooltip("AI 生成提交信息（还没接）")
-            .child(ICONS("sparkle", t.dim, 13)))
           .child(h_flex().id("commit").absolute().right(6).top(7).size(24)
             .items_center().justify_center().rounded(5)
             .bg(canCommit ? t.solid : t.raised)
@@ -704,13 +745,27 @@ class ChangesPanel extends View {
       // 文件：已暂存 / 已更改。有改动才撑高，没改动缩成一行，把空间让给历史。
       .child(div().flex_grow(1).flex_basis(0).min_h(36).w_full().relative().border_b(1).border_color(t.border)
         .child(v_flex().id("changes-files").absolute().inset_0().overflow_y_scroll().px(6).py(4)
-          .children([...this.section("已暂存", staged, t), ...this.section("已更改", unstaged, t)])
+          .children([
+            ...this.section("已暂存", staged, t, { icon: "minus", tip: "全部取消暂存", fn: (cx) => this.unstageAll(cx) }),
+            ...this.section("已更改", unstaged, t, { icon: "plus", tip: "全部暂存", fn: (cx) => this.stageAll(cx) }),
+          ])
           .when(!files.length, (e) => e.child(div().p(8).text_size(11).text_color(t.dim)
             .child(this.loading ? "扫描中…" : repo?.error || (this.repos.length ? "没有未提交的改动" : "这个目录下没有 git 仓库")))))
         .child(Scrollbar.vertical("changes-files").absolute().inset_0()))
       .when(Boolean(this.note), (e) => e.child(div().w_full().px(10).pb(4).text_size(10.5).text_color(t.ansi1).child(this.note)))
       // 历史：按剩余空间伸缩（最小 120），不再写死高度；标题行带仓库/分支切换
-      .child(v_flex().flex_none().h(Math.min(this.log.length || 1, 8) * ROW_H + 42).w_full()
+      .child(v_flex().flex_none().h(this.gitH ?? Math.min(this.log.length || 1, 12) * ROW_H + 42).w_full()
+        // 拖动条：按住上下拖就改 Git 区高度（往上拖变高）。
+        .child(div().id("git-resize").w_full().h(6).flex_none().cursor_row_resize()
+          .bg(this.dragging ? t.accent : t.background)
+          .hover((x) => x.bg(t.hover))
+          .on_mouse_down("left", (e, cx) => {
+            cx.stop_propagation();
+            this.dragging = true;
+            this.dragY = e.position.y;
+            this.dragH = this.gitH ?? Math.min(this.log.length || 1, 12) * ROW_H + 42;
+            cx.notify();
+          }))
         .child(h_flex().h(34).flex_none().w_full().pl(10).pr(8).gap(6).items_center().border_b(1).border_color(t.border)
           .child(ICONS("history", t.muted, 14))
           .child(div().flex_none().text_size(12.5).font_semibold().text_color(t.foreground).child("Git"))
@@ -720,6 +775,7 @@ class ChangesPanel extends View {
         .child(div().flex_1().min_h(0).relative()
           .child(v_flex().id("changes-history").absolute().inset_0().overflow_y_scroll().px(6).py(4).children(historyRows))
           .child(Scrollbar.vertical("changes-history").absolute().inset_0())))
+      .when(Boolean(dragCatcher), (e) => e.child(dragCatcher))
   }
 }
 

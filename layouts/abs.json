@@ -50,6 +50,19 @@
                 "weight": 1
               },
               "min": 81
+            },
+            {
+              "id": "agent2api-stats",
+              "type": "block",
+              "content": {
+                "mod": "agent2api",
+                "props": {
+                  "part": "stats"
+                }
+              },
+              "size": {
+                "px": 206
+              }
             }
           ]
         }
@@ -133,14 +146,14 @@
                       "id": "files",
                       "type": "block",
                       "content": {
-                        "mod": "files"
+                        "mod": "files-mine"
                       }
                     },
                     {
                       "id": "changes",
                       "type": "block",
                       "content": {
-                        "mod": "changes"
+                        "mod": "changes-mine"
                       }
                     }
                   ]

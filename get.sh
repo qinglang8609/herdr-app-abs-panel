@@ -63,10 +63,9 @@ for item in $ITEMS; do
 done
 rmdir "$stage" 2>/dev/null || true
 cp -f "$src/install.sh" "$DEST/install.sh"
-cp -f "$src/sync-layout.sh" "$DEST/sync-layout.sh" 2>/dev/null || true
 cp -f "$src/agent2api.example.json" "$DEST/agent2api.example.json" 2>/dev/null || true
 cp -f "$src/README.md" "$DEST/README.md" 2>/dev/null || true
-chmod +x "$DEST/install.sh" "$DEST/sync-layout.sh" 2>/dev/null || true
+chmod +x "$DEST/install.sh"
 
 say "已下载到 $DEST"
 exec sh "$DEST/install.sh"

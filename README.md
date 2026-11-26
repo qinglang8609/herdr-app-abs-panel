@@ -12,7 +12,7 @@
 | `mods/agent2api` | 侧栏底部统计块：Token / 请求 / 缓存命中 / 账号可用 / 可用积分 |
 
 内置的 `files` 和 `changes` 每次启动会被 app 按哈希重置，改不动它们的行为，
-所以这两份是独立模块；`sync-layout.sh` 会把布局里的 `files` / `changes` 换成自己那两份。
+所以这两份是独立模块；仓库的 `layouts/abs.json` 里已经把 `files` / `changes` 指向自己那两份。
 
 ## 一键安装
 
@@ -28,7 +28,7 @@ curl -fsSL https://raw.githubusercontent.com/qinglang8609/herdr-app-abs-panel/ma
 sh install.sh
 ```
 
-装完重启 herdr-app。默认切到 `abs-stats` 布局（带统计块那份）。
+装完重启 herdr-app，用 `abs` 布局（统计块、文件树、Git 面板都在这一份里）。
 
 统计块要读自己搭的面板，凭据在 `~/.config/herdr-app/agent2api.json`（600 权限，不进仓库）：
 

@@ -43,6 +43,7 @@ export default class Stats extends View {
   init(_props, cx) {
     this.data = null;
     this.note = null;
+    this.hidden = false; // 没配账号密码/token 就整块不显示
     this.busy = false;
     this.session = null; // { access, refresh, exp }
     this.points = null; // 所有账号的可用积分总数
@@ -150,10 +151,16 @@ export default class Stats extends View {
       try {
         const raw = await readTextFile(`${appHome()}/${CONFIG}`).catch(() => null);
         if (!raw) {
-          this.note = `缺 ${CONFIG}`;
+          this.hidden = true;
           return;
         }
         const cfg = JSON.parse(raw);
+        // 没填账号密码、也没有旧式 token：这块用不上，整块不画。
+        if (!(cfg.username && cfg.password) && !cfg.token && !cfg.refresh) {
+          this.hidden = true;
+          return;
+        }
+        this.hidden = false;
         const base = String(cfg.base || "https://code.d8gx.com").replace(/\/+$/, "");
         const bearer = (tok) => ["-H", `Authorization: Bearer ${tok}`];
 
@@ -175,7 +182,8 @@ export default class Stats extends View {
 
         let access = await this.authorize(cfg, raw, base);
         if (!access) {
-          this.note = this.note ?? "配置里没有账号密码，也没有 token";
+          if (!(cfg.username && cfg.password) && !cfg.token) { this.hidden = true; return; }
+          this.note = this.note ?? "登录失败：检查配置里的账号密码";
           return;
         }
         let [sum, acc] = await pull(access);
@@ -296,6 +304,9 @@ export default class Stats extends View {
               .flex_grow(Math.max(0.0001, total ? v / total : 0)),
           ),
         );
+
+    // 没配凭据：整块不占位置（布局节点仍在，只是画成空）。
+    if (this.hidden) return div().size(0);
 
     if (!this.data) {
       return v_flex()

@@ -2,9 +2,9 @@
 // 目录只从当前空间的工作目录往下找，不往父目录找，也不用 ~/.brain 兜底。
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, ScrollHandle } from "gpui-base";
-import { spaces, panes, focused, readTextFile, writeTextFile, watchFolder, exec, hc, theme, home, run, appHome, openOverlay, nextCommand, shared } from "herdr";
+import { spaces, panes, focused, readTextFile, writeTextFile, watchFolder, exec, hc, theme, home, run, appHome, openOverlay, nextCommand, shared, setShared } from "herdr";
 import Ports from "./ports.js";
-import { alpha } from "./lib.js";
+import { alpha, isShown } from "./lib.js";
 
 // 四个面板共用的一套亮色：节点、徽章、分类点都从这里取，不再各面板自选。
 const TINT = {
@@ -550,9 +550,23 @@ function parseLog(text) {
 // 同一个页面可能来自好几份文件：并成一份。任务按日期倒排，最新的在上面。
 function mergeTodo(docs) {
   const out = { doing: [], done: [], doingTitle: "Todo" };
+  // 同一条任务可能来自多份文件（本项目 + 子项目副本）：按 标题|日期 去重，
+  // 保留「已完成」那份，否则条数会翻倍。
+  const seen = new Map();
+  const put = (task, group) => {
+    if (!task) return;
+    const key = `${task.title}|${task.date ?? ""}`;
+    const had = seen.get(key);
+    if (had) {
+      if (had.task.done || !task.done) return;   // 已有完成版，或新的也没完成 -> 不动
+      had.list.splice(had.list.indexOf(had.task), 1);
+    }
+    out[group].push(task);
+    seen.set(key, { task, list: out[group] });
+  };
   for (const d of docs) {
-    out.doing.push(...(d?.doing ?? []));
-    out.done.push(...(d?.done ?? []));
+    for (const t of d?.doing ?? []) put(t, "doing");
+    for (const t of d?.done ?? []) put(t, "done");
     if (d?.doingTitle && out.doingTitle === "Todo") out.doingTitle = d.doingTitle;
   }
   const byDate = (a, b) => String(b.date ?? "").localeCompare(String(a.date ?? ""));
@@ -678,7 +692,8 @@ export default class AbsPanel extends View {
 
   // 工作目录或机器变了就立刻重读，不等下一个定时器。
   check(where, cx) {
-    const key = `${where.on ?? ""}|${where.dir ?? ""}`;
+    // 把可见性也算进 key：面板从收起变展开时目录没变，但得立刻补读一次。
+    const key = `${where.on ?? ""}|${where.dir ?? ""}|${isShown("review") ? 1 : 0}`;
     if (key === this.watchKey) return;
     this.watchKey = key;
     this.docsStale = true;
@@ -716,15 +731,18 @@ export default class AbsPanel extends View {
     // 先刷一次，再起轮询表。本机靠 watchFolder 立即刷新，这个表只兜底。
     this.refresh(cx);
     if (view === "sessions") this.sessRefresh(cx);
+    // 右侧面板收起来时不读文件：轮询表还在，但每轮直接跳过；
+    // 重新展开时 render 会走 check()，立刻补一次。
+    const visible = () => isShown("review");
 
     const stops = [];
     if (view === "sessions") {
-      stops.push(cx.timer.every(SESS_POLL_MS, (cx) => this.sessRefresh(cx)));
+      stops.push(cx.timer.every(SESS_POLL_MS, (cx) => { if (visible()) this.sessRefresh(cx); }));
       this.watchSessions(cx);
     } else {
       // 远程机器没有文件监听，只能轮询：5 秒一轮，改了就能看见；本机有 watchFolder，30 秒兜底就够。
       const every = this.where().on ? REMOTE_POLL_MS : BRAIN_POLL_MS;
-      stops.push(cx.timer.every(every, (cx) => this.refresh(cx)));
+      stops.push(cx.timer.every(every, (cx) => { if (visible()) this.refresh(cx); }));
     }
     this.stops = stops.filter(Boolean);
   }
@@ -849,7 +867,13 @@ export default class AbsPanel extends View {
     };
     if (at.dir) {
       const dir = at.dir.replace(/\/$/, "");
-      if (dir) take(await this.findDocsIn(dir, at.on));
+      if (dir) {
+        const found = await this.findDocsIn(dir, at.on);
+        // 本目录自己就有记忆文件时只认它：站在 ~/Code 这种多项目父目录上，
+        // 往下收会把兄弟项目的任务全并进来（既不是本项目的内容，也白读几十份）。
+        const own = found.filter((p) => p.startsWith(`${dir}/.brain/`));
+        take(own.length ? own : found);
+      }
     }
     this.docsStale = false;
     // 空结果不缓存：仓库现在没有 .brain，不代表一会不会有。
@@ -1037,9 +1061,9 @@ export default class AbsPanel extends View {
     const texts = await Promise.all(
       links.map((id) => readTextFile(`${base}/sessions/${id}.md`, { on }).catch(() => null)),
     );
+    // 读的这一轮已经被更新的一轮取代，结果丢掉（比的是最新请求，不是已完成的）。
+    if (this.linkedLoading !== key) return;
     this.linkedLoading = null;
-    // 读的这一轮已经被更新的一轮取代，结果丢掉。
-    if (this.linkedFor === key) return;
 
     const out = [];
     for (let i = 0; i < links.length; i += 1) {
@@ -1229,9 +1253,10 @@ export default class AbsPanel extends View {
     // 「完成任务 N 条」这类双链行换成它指向的真实任务：去掉链接行，换成 sessions 里读到的。
     const done = (this.todo.done ?? []).filter((x) => !String(x?.id ?? "").startsWith("log-"));
     const linked = this.linkedTasks ?? [];
-    // 去重：同一条任务可能来自两份文件（不同副本/会话展开），保留「已完成」的那份。
+    // doing/done 的去重在 mergeTodo 里做过；这里只把双链展开的任务并进来再去一次重。
     const unique = new Map();
-    for (const task of [...doing, ...done, ...linked]) {
+    for (const task of [...doing, ...done]) unique.set(`${task.title}|${task.date ?? ""}`, task);
+    for (const task of linked) {
       const key = `${task.title}|${task.date ?? ""}`;
       const had = unique.get(key);
       if (!had || (!had.done && task.done)) unique.set(key, task);
@@ -1245,6 +1270,7 @@ export default class AbsPanel extends View {
     const PER = 20;
     const pages = Math.max(1, Math.ceil(all.length / PER));
     const page = Math.min(Math.max(0, this.boardPage ?? 0), pages - 1);
+    this.boardPage = page;   // 条数变少后把越界的页码收回来，否则下次翻页跳错
     const shown = all.slice(page * PER, page * PER + PER);
     const shownOpen = shown.filter((x) => !x.done);
     const shownDone = shown.filter((x) => x.done);
@@ -1404,6 +1430,7 @@ export default class AbsPanel extends View {
     const PER = 20;
     const pages = Math.max(1, Math.ceil(all.length / PER));
     const page = Math.min(Math.max(0, this.logPage ?? 0), pages - 1);
+    this.logPage = page;
     const start = page * PER;
     const entries = all.slice(start, start + PER);
 
@@ -1535,6 +1562,7 @@ export default class AbsPanel extends View {
     const PER = 20;
     const pages = Math.max(1, Math.ceil(list.length / PER));
     const page = Math.min(Math.max(0, this.sessPage ?? 0), pages - 1);
+    this.sessPage = page;
     const shown = list.slice(page * PER, page * PER + PER);
 
     const body = shown.length
