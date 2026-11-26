@@ -109,14 +109,18 @@ export class Sidebar {
     if (!folders.size) return;
     this.refreshing = true;
     cx.spawn(async (cx) => {
-      let changed = false;
-      for (const key of folders) {
+      // 并发跑：目录多时串行要一两秒，并发只等最慢的那个。
+      const keys = [...folders];
+      const results = await Promise.all(keys.map((key) => {
         const [on, cwd] = JSON.parse(key);
-        const d = await diffStat(cwd, on).catch(() => null);
-        const before = this.diffs[key];
-        if (JSON.stringify(before) !== JSON.stringify(d)) changed = true;
+        return diffStat(cwd, on).catch(() => null);
+      }));
+      let changed = false;
+      keys.forEach((key, i) => {
+        const d = results[i];
+        if (JSON.stringify(this.diffs[key]) !== JSON.stringify(d)) changed = true;
         this.diffs[key] = d;
-      }
+      });
       // 已经不在列表里的目录（空间关了、终端 cd 走了）就删掉，别让 diffs 一直长。
       for (const key of Object.keys(this.diffs)) if (!folders.has(key)) delete this.diffs[key];
       this.refreshing = false;

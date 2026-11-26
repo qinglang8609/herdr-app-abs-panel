@@ -111,10 +111,18 @@ export function toggleTerminal(run) {
 // Git numbers for a folder: lines added and removed against HEAD, staged or
 // not. Null outside a repo. Reads write nothing under .git.
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
+// 同一目录的 diff 统计：顶栏和侧栏各自都在轮询，命中缓存就别再跑一次 git。
+// 5 秒的窗口足够让两个调用方合并，又不会让数字明显滞后。
+const diffCache = new Map();
+const DIFF_TTL = 5000;
+
 export async function diffStat(cwd, on) {
   if (!cwd) return null;
+  const cacheKey = `${on ?? ""}|${cwd}`;
+  const hit = diffCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < DIFF_TTL) return hit.value;
   const r = await exec("git", [...READ, "diff", "--numstat", "HEAD"], { cwd, on }).catch(() => ({ code: 1 }));
-  if (r.code !== 0) return null;
+  if (r.code !== 0) { diffCache.set(cacheKey, { value: null, at: Date.now() }); return null; }
   let add = 0, del = 0, files = 0;
   for (const line of r.stdout.split("\n")) {
     const [a, d] = line.split("\t");
@@ -123,7 +131,13 @@ export async function diffStat(cwd, on) {
     if (a !== "-") add += Number(a) || 0;
     if (d !== "-") del += Number(d) || 0;
   }
-  return { add, del, files };
+  const value = { add, del, files };
+  diffCache.set(cacheKey, { value, at: Date.now() });
+  if (diffCache.size > 64) {
+    const oldest = [...diffCache.entries()].sort((a, b) => a[1].at - b[1].at).slice(0, diffCache.size - 64);
+    for (const [k] of oldest) diffCache.delete(k);
+  }
+  return value;
 }
 
 // Whether a folder is a linked git worktree ("Worktree"), the main checkout
