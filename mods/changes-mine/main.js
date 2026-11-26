@@ -147,6 +147,7 @@ function layoutGraph(commits) {
   const occupied = Array.from({ length: n }, () => new Set());
   const paths = [];                          // { colour, segs: [{row, from, to}] }
   const forkColour = {};                     // 列 -> 分叉时定下的颜色
+  const nodeColour = new Array(n).fill(0);   // 每个节点所属分支的颜色
   let colourSeq = 0;
 
   const freeCol = (row, avoid) => {
@@ -160,9 +161,10 @@ function layoutGraph(commits) {
     // 起点列：已被别的线安排过就用那个，否则找空位
     let col = colOf[start] >= 0 ? colOf[start] : freeCol(start, -1);
     colOf[start] = col;
+    // col 0 是主干，恒用 0 号色（绿）；其它列的颜色在分叉时就已经定好
+    const colour = col === 0 ? 0 : (forkColour[col] ?? 0);
+    nodeColour[start] = colour;
     occupied[start].add(col);
-    // col 0 是主干，恒用第一色；其它列沿用分叉时定下的颜色
-    const colour = col === 0 ? 0 : (forkColour[col] ?? (colourSeq++ % LANE.length));
     const segs = [];
     let cur = start;
     let parent = nextParent[cur].shift();
@@ -178,6 +180,7 @@ function layoutGraph(commits) {
       occupied[row].add(target);
       if (parent === row) {
         colOf[row] = target;
+        nodeColour[row] = target === 0 ? 0 : colour;
         cur = row;
         const hadBranch = nextParent[cur].length === 0 && colOf[cur] >= 0;
         parent = nextParent[cur].shift();
@@ -195,6 +198,9 @@ function layoutGraph(commits) {
     for (const extra of nextParent[start]) {
       const forkCol = freeCol(start, colOf[start]);
       occupied[start].add(forkCol);
+      // 分支色从 1 号开始依次递增（0 号留给主干），否则第一条分支会和主干同色。
+      const branchColour = (forkCol > 0) ? (++colourSeq) % LANE.length : 0;
+      if (forkCol > 0) forkColour[forkCol] = branchColour;
       // 第一段就是 merge 行的分叉：本列 -> 新列
       const fsegs = [{ row: start, from: colOf[start], to: forkCol }];
       let fc = forkCol;
@@ -205,19 +211,18 @@ function layoutGraph(commits) {
         fsegs.push({ row: row - 1, from: fc, to: target, drop: true });
         if (isTarget) {
           if (colOf[row] < 0) { colOf[row] = target; }
+          nodeColour[row] = target === 0 ? 0 : branchColour;
           occupied[row].add(target);
           break;
         }
         occupied[row].add(target);
         fc = target;
       }
-      // 分出来的这条就是那个父所在的分支，颜色按新列序取，后续同列路径沿用
-      if (forkCol > 0) forkColour[forkCol] = colourSeq++ % LANE.length;
-      paths.push({ colour: forkColour[forkCol], segs: fsegs });
+      paths.push({ colour: branchColour, segs: fsegs });
     }
     nextParent[start].length = 0;
   }
-  return commits.map((c, i) => ({ ...c, col: colOf[i] < 0 ? 0 : colOf[i], paths, forkColour }));
+  return commits.map((c, i) => ({ ...c, col: colOf[i] < 0 ? 0 : colOf[i], colour: nodeColour[i], paths, forkColour }));
 }
 
 async function scanLog(root, on) {
@@ -657,18 +662,18 @@ class ChangesPanel extends View {
         .when(!this.dragging, (e) => e.children(paths.map((p) => window.paint_path(p.path, p.color))));
 
       // 本行有哪些列活着（节点列 + 穿过的泳道），文字要让到最右那条之后。
-      const activeCols = rows.map((r, i) => {
-        const set = new Set([r.col]);
+      // 文字只需让开「从上方延续到本行」的泳道；本行才分出去的曲线往下走，不占本行文字位置。
+      const textLeft = (i) => {
+        let right = rows[i].col;
         for (const p of (rows[0]?.paths ?? [])) {
           for (const sg of p.segs) {
-            if (sg.row === i || sg.row === i - 1) { set.add(sg.from); set.add(sg.to); }
+            if (sg.row === i - 1 && !sg.tail) right = Math.max(right, sg.to);
           }
         }
-        return set;
-      });
-      const textLeft = (i) => xOf(Math.max(...activeCols[i]));
+        return xOf(right);
+      };
       const lines = rows.map((r, i) => {
-        const color = LANE[r.col % LANE.length];
+        const color = LANE[(r.colour ?? r.col) % LANE.length];
         // 当前提交是空心环，其余是实心圆点
         const dot = r.head
           ? div().size(9).rounded(5).border_2().border_color(color).bg(t.background)
