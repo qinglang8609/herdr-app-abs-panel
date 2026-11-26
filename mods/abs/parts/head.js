@@ -91,7 +91,7 @@ export class Header {
     this.stat = null;
     this.statKey = null;
     this.refresh(cx);
-    cx.timer.every(4000, (cx) => this.refresh(cx));
+    cx.timer.every(12000, (cx) => this.refresh(cx));
     cx.spawn(async (cx) => {
       for (;;) {
         const c = await nextCommand();

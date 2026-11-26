@@ -102,7 +102,7 @@ export default class Spaces extends View {
     cx.timer.every(15000, cx => this.refreshMachines(cx));
     // `git status` walks the whole tree, on another machine a process there:
     // only when its answer could have changed (see `due`).
-    cx.timer.every(250, (cx) => this.checkNew(cx));
+    cx.timer.every(1000, (cx) => this.checkNew(cx));
     // agent 的状态变了（working/done/blocked）就重画一次。只在真的变了才 notify，
     // 闲着时不打扰。spins 的动画自己走，不需要这里驱动。
     this.agentKey = this.agentStates();

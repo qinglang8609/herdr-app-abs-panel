@@ -1,6 +1,7 @@
 // A lazy file browser for the focused pane's folder, with bounded read-only previews.
-import { View, div, svg } from "gpui-kit";
+import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
+import { FOR_EXT, FOR_NAME, FOR_DIR, FILE, FOLDER, FOLDER_OPEN } from "./icons-map.js";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window, props, openOverlay, closeOverlay } from "herdr";
 
 // The panels share data in one VM, but their host tasks belong to separate copies.
@@ -45,6 +46,20 @@ async function repoStatus(root, on, { after, visiting, urgent, allowInactive }, 
     return scan;
   }
   return null;
+}
+
+// 按文件名 / 扩展名 / 文件夹名挑图标；挑不到就用默认的 file / folder。
+// 顺序照 VS Code：完整文件名优先于扩展名（package.json 应该是 npm 图标，不是 json）。
+function iconFor(name, isDir, expanded) {
+  const lower = String(name).toLowerCase();
+  if (isDir) {
+    return FOR_DIR[lower] ?? (expanded ? FOLDER_OPEN : FOLDER);
+  }
+  const byName = FOR_NAME[lower];
+  if (byName) return byName;
+  const dot = lower.lastIndexOf(".");
+  const ext = dot > 0 ? lower.slice(dot + 1) : "";
+  return FOR_EXT[ext] ?? FILE;
 }
 
 function location() {
@@ -268,8 +283,8 @@ class Browser extends View {
       const path = prefix ? `${prefix}/${entry.name}` : entry.name, open = this.folders.has(path), mark = this.marks[`${this.root}/${path}`];
       out.push(h_flex().id(`file-${path}`).h(28).flex_none().pl(8 + depth * 18).pr(8).gap(7).items_center().rounded(7).cursor_pointer().hover(s => s.bg(t.hover))
         .on_click((_e, cx) => entry.dir ? this.toggle(path, cx) : this.openViewer(path))
-        .child(entry.dir ? svg(`mods/files/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
-        .child(svg(`mods/files/${entry.dir ? "folder" : "file"}.svg`).size(14).flex_none().text_color(t.muted))
+        .child(entry.dir ? svg(`mods/files-mine/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
+        .child(image(`mods/files-mine/icons/${iconFor(entry.name, entry.dir, open)}`).w(15).h(15).flex_none())
         .child(div().flex_1().min_w(0).truncate().child(entry.name))
         .when(Boolean(mark), el => el.child(div().text_size(11).text_color(mark === "A" ? t.ansi2 : mark === "D" || mark === "U" ? t.ansi1 : t.blocked).child(mark))));
       if (entry.dir && open) this.rows(path, depth + 1, out, t);

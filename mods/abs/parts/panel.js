@@ -30,7 +30,7 @@ const BRAIN_POLL_MS = 30000;
 // 远程机器上没法监听目录，只能轮询；5 秒才不至于让人觉得「不更新」。
 const REMOTE_POLL_MS = 5000;
 // 扫到非空结果后，这么久内不再重扫同一台机器（切工作区会强制重扫）。
-const SESS_TTL_MS = 25000;
+const SESS_TTL_MS = 55000;
 
 // 字号：跟左侧栏（side.js / spaces.js 用 12 / 12.5 / 13）对齐，
 // 面板正文不再自留小一号。要统一调就改这五个值。
@@ -39,6 +39,16 @@ const FS_ITEM = 12;     // 条目标题（任务、日志、会话、图谱分�
 const FS_BODY = 11.5;   // 正文、空态提示
 const FS_META = 10.5;   // 日期、徽章计数、分区标签、分页
 const FS_BADGE = 10;    // 带底色的状态徽章（白字）
+
+// 缓存条目上限：切目录、切仓库、看会话多了以后这些表只增不减，
+// 超过就丢掉最早的一批（对象属性顺序 = 插入顺序，够用）。
+function trimCache(obj, max) {
+  if (!obj) return obj;
+  const keys = Object.keys(obj);
+  if (keys.length <= max) return obj;
+  for (const k of keys.slice(0, keys.length - max)) delete obj[k];
+  return obj;
+}
 
 function norm(p) {
   return String(p || "").replace(/\/+$/, "");
@@ -868,11 +878,11 @@ export default class AbsPanel extends View {
     if (at.dir) {
       const dir = at.dir.replace(/\/$/, "");
       if (dir) {
-        const found = await this.findDocsIn(dir, at.on);
-        // 本目录自己就有记忆文件时只认它：站在 ~/Code 这种多项目父目录上，
-        // 往下收会把兄弟项目的任务全并进来（既不是本项目的内容，也白读几十份）。
-        const own = found.filter((p) => p.startsWith(`${dir}/.brain/`));
-        take(own.length ? own : found);
+        // 先看本目录的 .brain：一次 test -f 是毫秒级，而往下 find 5 层在 ~ 这类
+        // 大目录上要 2 秒（实测 2.07s）。本目录有记忆文件时本来就只认它，
+        // 那个 find 纯属白跑。
+        const own = await this.ownBrain(dir, at.on);
+        take(own.length ? own : await this.findDocsIn(dir, at.on));
       }
     }
     this.docsStale = false;
@@ -880,8 +890,18 @@ export default class AbsPanel extends View {
     // 缓存住空结果的话，新文件要等缓存过期（60 秒）才看得到；
     // 这时也没有目录可监听，没人会把 docsStale 置上。
     const empty = !docs.todo.length && !docs.log.length && !docs.index.length;
-    if (!empty) (this.docsCache ??= {})[key] = { docs, at: Date.now() };
+    if (!empty) {
+      (this.docsCache ??= {})[key] = { docs, at: Date.now() };
+      trimCache(this.docsCache, 64);
+    }
     return docs;
+  }
+
+  // 本目录自己的 .brain 里有哪些记忆文件（一到三次 test -f，毫秒级）。
+  async ownBrain(dir, on) {
+    const cmd = 'for f in todo log index; do [ -f "$1/.brain/$f.md" ] && printf "%s\\n" "$1/.brain/$f.md"; done';
+    const r = await exec("sh", ["-c", cmd, "brain", dir], { on }).catch(() => null);
+    return String(r?.stdout ?? "").split("\n").map((x) => x.trim()).filter(Boolean);
   }
 
   // 在一个目录里找这三种文件，最多往下 5 层。找不到返回空数组，不报错。
@@ -1643,6 +1663,7 @@ export default class AbsPanel extends View {
         }
         this.tokenCache ??= {};
         for (const x of todo) this.tokenCache[x.file] = { n: Number(out[x.file] ?? 0), at: x.mtime };
+        trimCache(this.tokenCache, 400);
       } catch {
         /* 数不出来就不显示，不打断列表 */
       } finally {
@@ -1677,6 +1698,7 @@ export default class AbsPanel extends View {
             const list = await this.sessScanOn(t.on);
             if (list.length) {
               this.sessCache[key] = { list, at: Date.now() };
+              trimCache(this.sessCache, 16);
               got = { on: t.on, list };
               break;
             }
