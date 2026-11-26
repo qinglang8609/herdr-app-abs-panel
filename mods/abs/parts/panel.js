@@ -1,9 +1,21 @@
 // ABS 记忆库面板：把 .brain 的 index / todo / log 读成三块卡片。
 // 目录只从当前空间的工作目录往下找，不往父目录找，也不用 ~/.brain 兜底。
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex } from "gpui-base";
+import { v_flex, h_flex, ScrollHandle } from "gpui-base";
 import { spaces, panes, focused, readTextFile, writeTextFile, watchFolder, exec, hc, theme, home, run, appHome, openOverlay, nextCommand, shared } from "herdr";
 import Ports from "./ports.js";
+import { alpha } from "./lib.js";
+
+// 四个面板共用的一套亮色：节点、徽章、分类点都从这里取，不再各面板自选。
+const TINT = {
+  green: "#4fbf6b",
+  gold: "#e2b45c",
+  blue: "#8fb1ec",
+  purple: "#b48ce0",
+  red: "#e2574c",
+  cyan: "#63c7c0",
+};
+const TINTS = [TINT.blue, TINT.green, TINT.gold, TINT.purple, TINT.cyan, TINT.red];
 
 // ── 会话（pi 历史）───────────────────────
 
@@ -22,7 +34,7 @@ const SESS_TTL_MS = 25000;
 
 // 字号：跟左侧栏（side.js / spaces.js 用 12 / 12.5 / 13）对齐，
 // 面板正文不再自留小一号。要统一调就改这五个值。
-const FS_CARD = 12.5;   // 卡片标题
+const FS_CARD = 13;     // 卡片标题
 const FS_ITEM = 12;     // 条目标题（任务、日志、会话、图谱分区）
 const FS_BODY = 11.5;   // 正文、空态提示
 const FS_META = 10.5;   // 日期、徽章计数、分区标签、分页
@@ -200,10 +212,19 @@ function parseKid(body, parentDone) {
   return rest ? { text: rest, done, mark } : null;
 }
 
-// 看板行里的时间只显示日期：`2026-11-16 11:00` → `2026-11-16`。
-function dateOnly(value) {
-  const m = /\d{4}-\d{2}-\d{2}/.exec(String(value ?? ""));
-  return m ? m[0] : String(value ?? "");
+// 看板行右侧的时间，写得短：今天 20:57 / 昨天 / 11-25 / 2025-12-01。
+function dateShort(value) {
+  const m = /(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2}))?/.exec(String(value ?? ""));
+  if (!m) return String(value ?? "");
+  const [, y, mo, d, hh, mm] = m;
+  const pad = (n) => String(n).padStart(2, "0");
+  const now = new Date();
+  const day = (x) => `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}`;
+  const time = hh ? ` ${pad(hh)}:${mm ?? "00"}` : "";
+  if (`${y}-${mo}-${d}` === day(now)) return `今天${time}`;
+  if (`${y}-${mo}-${d}` === day(new Date(now.getTime() - 86_400_000))) return `昨天${time}`;
+  if (Number(y) === now.getFullYear()) return `${mo}-${d}`;
+  return `${y}-${mo}-${d}`;
 }
 
 // 子项前面那个标记：写了哪种就显示哪种，没写就跟着父任务的完成状态。
@@ -587,6 +608,7 @@ export default class AbsPanel extends View {
     this.index = { sections: [], rules: [] };
     this.log = [];
     this.logPage = 0;
+    this.logScroll = ScrollHandle.new(); // 翻页后用它把列表拉回顶部
     this.view = "sessions";
     this.loading = true;
     // 会话页的状态
@@ -599,7 +621,9 @@ export default class AbsPanel extends View {
     this.linkedTasks = []; // 所有双链日志里解析出的任务，平铺在已完成里
     this.linkedFor = null; // 已经读过哪一份 todo
     this.linkedLoading = null; // 正在读的那份
-    this.boardPage = 0;    // 看板「已完成」翻到第几页
+    this.boardPage = 0;    // 看板翻到第几页
+    this.boardScroll = ScrollHandle.new();
+    this.sessScroll = ScrollHandle.new();
     this.sessPage = 0;     // 会话列表翻到第几页
     this.timerView = null; // 当前给哪一页起着刷新表
     this.stops = [];       // 那些表的 Task，切页时 cancel
@@ -911,21 +935,60 @@ export default class AbsPanel extends View {
   // that share of the free height and its own body scrolls instead.
   // `footer`: pinned under the scrolling body, so paging stays put.
   // `gap`: the space between the cards in the body; 0 makes them one flat list.
-  card(title, badge, body, fill = 0, footer = null, gap = 6) {
+  card(title, badge, body, fill = 0, footer = null, gap = 6, scroll = null) {
     const t = theme();
-    return v_flex().w_full().rounded(10).overflow_hidden().bg(t.background)
+    return v_flex().w_full().rounded(12).overflow_hidden().bg(t.background)
       .border_1().border_color(t.border)
       .when(fill > 0, (e) => e.flex_grow(fill).flex_basis(0).min_h(0), (e) => e.flex_none())
-      .child(h_flex().h(32).flex_none().px(9).gap(6).items_center().border_b(1).border_color(t.border)
+      .child(h_flex().h(36).flex_none().px(12).gap(7).items_center().border_b(1).border_color(t.border)
         .child(div().text_size(FS_CARD).font_semibold().text_color(t.foreground).child(title))
-        .when(badge != null, (e) => e.child(div().px(5).rounded(4).bg(t.chrome).text_size(FS_BADGE).text_color(t.muted).child(String(badge))))
+        .when(badge != null, (e) => e.child(div().px(6).py(1).rounded(5).bg(t.chrome).text_size(FS_BADGE).text_color(t.muted).child(String(badge))))
         .child(div().flex_1()))
       .child(
         fill > 0
-          ? div().flex_1().min_h(0).overflow_y_scrollbar().child(v_flex().px(4).py(5).gap(gap).w_full().children(body))
-          : v_flex().px(4).py(5).gap(gap).children(body),
+          ? div().flex_1().min_h(0).overflow_y_scrollbar()
+              .when(Boolean(scroll), (e) => e.track_scroll(scroll))
+              .child(v_flex().px(6).py(6).gap(gap).w_full().children(body))
+          : v_flex().px(6).py(6).gap(gap).children(body),
       )
       .when(footer != null, (e) => e.child(footer));
+  }
+
+  // 卡片底部的翻页条：Prev / 页码 / Next。看板、日志、会话三处共用这一份。
+  // onPage 收到目标页码；给了 scroll 就把列表拉回第一条。
+  pager(prefix, page, pages, onPage, scroll) {
+    const t = theme();
+    const btn = (name, label, to, on) =>
+      h_flex()
+        .id(`${prefix}-${name}`)
+        .h(20)
+        .px(8)
+        .flex_none()
+        .items_center()
+        .rounded(6)
+        .bg(t.chrome)
+        .text_color(on ? t.foreground : t.dim)
+        .when(on, (x) => x.cursor_pointer().hover((y) => y.bg(t.hover)))
+        .on_click((_e, cx) => {
+          if (!on) return;
+          onPage(to);
+          scroll?.scroll_to_item?.(0);
+          cx.notify();
+        })
+        .child(div().text_size(FS_META).child(label));
+    return h_flex()
+      .w_full()
+      .flex_none()
+      .h(32)
+      .px(8)
+      .gap(8)
+      .items_center()
+      .justify_center()
+      .border_t(1)
+      .border_color(t.border)
+      .child(btn("prev", "‹ Prev", page - 1, page > 0))
+      .child(div().text_size(FS_META).text_color(t.muted).child(`${page + 1} / ${pages}`))
+      .child(btn("next", "Next ›", page + 1, page < pages - 1));
   }
 
   // 三色：绿=进行中，红=暂停（滞留/搁置），橙=完成。
@@ -933,19 +996,20 @@ export default class AbsPanel extends View {
   // 圆点颜色：完成=绿，暂停=红，进行中=绿（进行中本来就该是绿的）。
   // 三种卡片（看板任务、图谱分类、日志）都用绿色表示“已完成/正常”，保持一致。
   // 状态标签的底色：进行中=绿，讨论中=橙，滞留/搁置/暂停=红。字都是白的。
+  // 状态色统一用 TINT 那套亮色：进行中=绿，讨论中=金，滞留/搁置/暂停=红。
   stateBadge(t, state) {
     const s = state ?? "";
-    if (/讨论中/.test(s)) return "#e8871e";   // 正橙
-    if (/滞留|搁置|暂停/.test(s)) return "#d1495b"; // 红
-    if (/进行中/.test(s)) return "#2e7d4f";   // 深绿
-    return t.chrome;
+    if (/讨论中/.test(s)) return TINT.gold;
+    if (/滞留|搁置|暂停/.test(s)) return TINT.red;
+    if (/进行中/.test(s)) return TINT.green;
+    return t.muted;
   }
 
   stateColor(task) {
-    const t = theme();
-    if (task.done) return t.ansi2;
-    const paused = /滞留|搁置|讨论中/.test(task.state ?? "");
-    return paused ? t.ansi1 : t.ansi2;
+    if (task.done) return TINT.green;
+    if (/讨论中/.test(task.state ?? "")) return TINT.gold;
+    if (/滞留|搁置|暂停/.test(task.state ?? "")) return TINT.red;
+    return TINT.green;
   }
 
   // 点开详情：任务带全文与子项，图谱与日志各自带上自己的正文。
@@ -1057,12 +1121,15 @@ export default class AbsPanel extends View {
     });
   }
 
-  // 一条任务：名字最大，下面是说明；左上角圆点看状态，子项缩进列在下面。
-  // 三行：标题 / 描述 / 时间与子项数。子项缩进列在下面。
-  // 只有三行：标题 / 描述 / 时间 + 右侧状态与子项数。子项明细点开弹窗看。
+  // 一条任务：左边圆圈、标题单行省略、时间靠右，注释缩进在下一行。
+  // 作者和状态文字在详情弹窗里，行上只留圆圈颜色看状态（滞留/讨论中另加小徽章）。
   taskRow(task, done = false) {
     const t = theme();
-    const dot = done ? t.dim : this.stateColor(task);
+    // 没做完是空心环（颜色 = 状态），做完是实心绿点带勾。
+    const ring = done
+      ? div().size(10).flex_none().rounded(5).bg(TINT.green).flex().items_center().justify_center()
+          .child(div().text_size(7).text_color("#0f1115").child("✓"))
+      : div().size(10).flex_none().rounded(5).border_1().border_color(this.stateColor(task));
     // 描述里去掉【结论】和 (完成 ...) 尾巴，那些已经有自己的位置或不要了。
     const cleanNote = (task.note ?? "")
       .replace(/【[^】]*】/g, "")
@@ -1071,25 +1138,25 @@ export default class AbsPanel extends View {
       .trim();
     const detail = cleanNote && cleanNote !== task.title ? cleanNote : "";
     const kids = task.children ?? [];
-    return v_flex().w_full().flex_none().gap(3).px(7).py(6).rounded(7)
+    return v_flex().w_full().flex_none().gap(2).px(7).py(5).rounded(8)
       .cursor_pointer()
       .hover((s) => s.bg(t.chrome))
       .on_click(() => this.openDetail("task", task))
-      // 第一行：状态点 + 标题 + 状态徽章。
-      .child(h_flex().gap(6).items_center()
-        .child(div().size(6).flex_none().rounded(3).bg(dot))
-        .child(div().flex_1().min_w(0).truncate().text_size(FS_ITEM).font_semibold().text_color(t.foreground).child(task.title))
-        .when(Boolean(task.state), (e) => e.child(div().flex_none().px(5).py(1).rounded(4).bg(this.stateBadge(t, task.state)).text_size(FS_BADGE).text_color("#ffffff").child(task.state))))
-      // 第二行：描述，没有就不画这一行
+      // 第一行：圆圈 + 标题 + 右侧时间。
+      .child(h_flex().w_full().gap(7).items_center()
+        .child(ring)
+        .child(div().flex_1().min_w(0).truncate().text_size(FS_ITEM).font_medium()
+          .text_color(done ? t.dim : t.foreground)
+          .when(done, (e) => e.line_through())
+          .child(task.title))
+        // 「进行中」是常态，不占位；滞留/搁置/讨论中才挂个小徽章。
+        .when(Boolean(task.state) && !done && !/进行中/.test(task.state), (e) =>
+          e.child(div().flex_none().px(6).py(1).rounded(5).bg(alpha(this.stateBadge(t, task.state), 0.16)).text_size(FS_BADGE).text_color(this.stateBadge(t, task.state)).child(task.state)))
+        .when(Boolean(task.date), (el) =>
+          el.child(div().flex_none().text_size(FS_META).text_color(t.dim).child(dateShort(task.date)))))
+      // 第二行：注释，缩进对齐标题（和圆圈 10 + 间距 7 对齐）。
       .when(Boolean(detail), (e) =>
-        e.child(div().w_full().min_w(0).truncate().text_size(FS_META).text_color(t.dim).child(detail)),
-      )
-      // 第三行：作者在左、时间在右。
-      .when(Boolean(task.who) || Boolean(task.date), (e) =>
-        e.child(h_flex().w_full().gap(6).items_center()
-          .child(div().flex_none().text_size(FS_META).text_color(t.dim).child(task.who || ""))
-          .child(div().flex_1())
-          .when(Boolean(task.date), (el) => el.child(div().flex_none().text_size(FS_META).text_color(t.dim).child(dateOnly(task.date))))),
+        e.child(div().pl(17).w_full().min_w(0).truncate().text_size(FS_META).text_color(t.dim).child(detail)),
       )
       // 子项：在下面按树形列出来，最后一条用 └─。
       .when(kids.length > 0, (e) =>
@@ -1097,6 +1164,7 @@ export default class AbsPanel extends View {
           v_flex()
             .w_full()
             .mt(2)
+            .pl(17)
             .gap(1)
             .children(
               kids.map((kid, i) =>
@@ -1121,7 +1189,7 @@ export default class AbsPanel extends View {
           v_flex()
             .w_full()
             .mt(2)
-            .pl(9)
+            .pl(17)
             .gap(2)
             .when(Boolean(this.logMissing), (x) => x.child(div().text_size(FS_META).text_color(t.ansi1).child(this.logMissing)))
             .when(this.logTasks.length === 0 && !this.logMissing, (x) => x.child(div().text_size(FS_META).text_color(t.dim).child("这份记录里没有任务")))
@@ -1150,15 +1218,17 @@ export default class AbsPanel extends View {
       );
   }
 
-  // 看板：一张卡片，不分段、不加小标题，没做完的和做完的按时间混排，最新的在上面。
-  // 状态靠圆点颜色和右侧的状态标签区分。
+  // 看板：先列没做完的（按时间倒排），再一组可收起的「已完成」。
+  // 行上只有圆圈、标题、时间；状态看圆圈颜色，说明缩进在标题下面。
+  // 看板：没做完的排前面，做完的在后，中间一条 Done 分隔；分页每页 20 条。
+  // 不分页的话 100 多条已完成全渲染，每 30 秒轮询刷新一次白花力气。
+  // 行上只有圆圈、标题、时间；状态看圆圈颜色，注释缩进在标题下面。
   boardCard(fill = 1) {
     const t = theme();
     const doing = this.todo.doing ?? [];
     // 「完成任务 N 条」这类双链行换成它指向的真实任务：去掉链接行，换成 sessions 里读到的。
     const done = (this.todo.done ?? []).filter((x) => !String(x?.id ?? "").startsWith("log-"));
     const linked = this.linkedTasks ?? [];
-    // 进行中的也在这张列表里：不分段，全部按日期倒排，最新的在上面。
     // 去重：同一条任务可能来自两份文件（不同副本/会话展开），保留「已完成」的那份。
     const unique = new Map();
     for (const task of [...doing, ...done, ...linked]) {
@@ -1166,56 +1236,48 @@ export default class AbsPanel extends View {
       const had = unique.get(key);
       if (!had || (!had.done && task.done)) unique.set(key, task);
     }
-    const all = [...unique.values()]
+    const byDate = [...unique.values()]
       .sort((a, b) => String(b.date ?? "").localeCompare(String(a.date ?? "")));
+    const open = byDate.filter((x) => !x.done);
+    const finished = byDate.filter((x) => x.done);
+    const all = [...open, ...finished];
+
     const PER = 20;
     const pages = Math.max(1, Math.ceil(all.length / PER));
     const page = Math.min(Math.max(0, this.boardPage ?? 0), pages - 1);
     const shown = all.slice(page * PER, page * PER + PER);
+    const shownOpen = shown.filter((x) => !x.done);
+    const shownDone = shown.filter((x) => x.done);
 
-    // 翻页条钉在卡片底部，不跟着列表滚。
-    const btn = (id, label, to, on) =>
-      h_flex()
-        .id(id)
-        .h(20)
-        .px(8)
-        .flex_none()
-        .items_center()
-        .rounded(6)
-        .bg(t.chrome)
-        .text_color(on ? t.foreground : t.dim)
-        .when(on, (x) => x.cursor_pointer().hover((y) => y.bg(t.hover)))
-        .on_click((_e, cx) => {
-          if (!on) return;
-          this.boardPage = to;
-          cx.notify();
-        })
-        .child(div().text_size(FS_META).child(label));
-    // 只有一页也照常显示翻页条：页码显示 1，上一页/下一页自己置灰、点不动。
-    const footer = h_flex()
+    // 「Done N」只是个分隔标签，不折叠；N 是全部已完成数。
+    const doneHeader = h_flex()
       .w_full()
       .flex_none()
-      .h(32)
-      .px(8)
-      .gap(8)
+      .gap(5)
+      .px(7)
+      .pt(7)
+      .pb(3)
       .items_center()
-      .justify_center()
-      .border_t(1)
-      .border_color(t.border)
-      .child(btn("abs-board-prev", "‹ Prev", page - 1, page > 0))
-      .child(div().text_size(FS_META).text_color(t.muted).child(`${page + 1} / ${pages}`))
-      .child(btn("abs-board-next", "Next ›", page + 1, page < pages - 1));
+      .child(div().flex_none().text_size(FS_META).text_color(t.muted).child("Done"))
+      .child(div().flex_none().text_size(FS_META).text_color(t.dim).child(String(finished.length)))
+      .child(div().flex_1());
+
+    const footer = this.pager("abs-board", page, pages, (to) => { this.boardPage = to; }, this.boardScroll);
 
     return this.card(
-      "看板",
-      null,
+      "Todo",
+      `${open.length} open`,
       [
-        ...shown.map((task) => this.taskRow(task, task.done)),
+        ...shownOpen.map((task) => this.taskRow(task, false)),
+        ...(shownDone.length
+          ? [doneHeader, ...shownDone.map((task) => this.taskRow(task, true))]
+          : []),
         ...(all.length === 0 ? [this.emptyNote(t, "todo.md 里还没有任务")] : []),
       ],
       fill,
       footer,
       0, // 看板是一整条列表：卡片之间不留空隙
+      this.boardScroll,
     );
   }
 
@@ -1231,17 +1293,17 @@ export default class AbsPanel extends View {
     // 不按名字排除、也不因没条目就吞掉。
     const sections = this.index.sections ?? [];
     return this.card(
-      "图谱索引",
-      `${(this.index.sections ?? []).reduce((n, s) => n + (s.items.length || s.stated || 0), 0)} 页`,
+      "Index",
+      `${(this.index.sections ?? []).reduce((n, s) => n + (s.items.length || s.stated || 0), 0)} pages`,
       [
-        ...(sections.length ? sections.map((s) => h_flex().w_full().flex_none().gap(6).items_center().px(7).py(6).rounded(7)
+        ...(sections.length ? sections.map((s, i) => h_flex().w_full().flex_none().gap(7).items_center().px(7).py(5).rounded(8)
           .cursor_pointer().hover((el) => el.bg(t.chrome))
           .on_click(() => this.openDetail("section", s))
-          .child(div().size(7).flex_none().rounded(4).bg(t.ansi6))
-          .child(div().flex_1().min_w(0).truncate().text_size(FS_ITEM).font_semibold().text_color(t.foreground).child(s.name))
-          .child(div().text_size(FS_META).text_color(t.muted).child(`${s.items.length || s.stated || 0} 页`))) : [div().px(6).text_size(FS_BODY).text_color(t.dim).child("索引为空")]),
+          .child(div().size(10).flex_none().rounded(5).bg(TINTS[i % TINTS.length]))
+          .child(div().flex_1().min_w(0).truncate().text_size(FS_ITEM).font_medium().text_color(t.foreground).child(s.name))
+          .child(div().text_size(FS_META).text_color(t.dim).child(`${s.items.length || s.stated || 0} pages`))) : [div().px(6).text_size(FS_BODY).text_color(t.dim).child("索引为空")]),
       ],
-      0,
+      1, // 撑满剩下的高度，分类多的时候在卡片里滚
       null,
       0,
     );
@@ -1260,13 +1322,13 @@ export default class AbsPanel extends View {
     const shown = expanded ? rules : rules.slice(0, LIMIT);
     const hidden = rules.length - shown.length;
     return this.card(
-      "铁律",
-      `${rules.length} 条`,
+      "Rules",
+      `${rules.length}`,
       [
-        ...(shown.length ? shown.map((text, i) => h_flex().w_full().flex_none().gap(6).items_center().px(7).py(6).rounded(7)
+        ...(shown.length ? shown.map((text, i) => h_flex().w_full().flex_none().gap(7).items_center().px(7).py(5).rounded(8)
           .hover((el) => el.bg(t.chrome))
-          .child(div().text_size(FS_META).flex_none().text_color(t.ansi6).child(`${i + 1}`))
-          .child(div().flex_1().min_w(0).text_size(FS_BODY).text_color(t.foreground).child(text))
+          .child(div().text_size(FS_META).flex_none().w(12).text_color(t.dim).child(`${i + 1}`))
+          .child(div().flex_1().min_w(0).truncate().text_size(FS_BODY).text_color(t.foreground).child(text))
           .when(editable, (e) => e.child(div().id(`abs-rule-del-${i}`).size(18).flex_none().flex().items_center().justify_center()
             .rounded(5).text_size(FS_BODY).text_color(t.dim).cursor_pointer()
             .hover((s) => s.bg(t.hover).text_color(t.ansi1))
@@ -1278,7 +1340,7 @@ export default class AbsPanel extends View {
           .cursor_pointer().hover((s) => s.text_color(t.foreground))
           .on_click((_e, cx) => { this.rulesOpen = false; cx.notify(); }).child("收起")] : []),
         editable
-          ? h_flex().id("abs-rule-add").mt(2).h(26).px(8).flex_none().items_center().justify_center().gap(5).rounded(7)
+          ? h_flex().id("abs-rule-add").mt(2).h(26).px(8).flex_none().items_center().justify_center().gap(5).rounded(8)
             .text_size(FS_BODY).text_color(t.dim).cursor_pointer()
             .hover((s) => s.bg(t.chrome).text_color(t.foreground))
             .on_click(() => this.addRule()).child("+ 添加铁律")
@@ -1333,16 +1395,21 @@ export default class AbsPanel extends View {
     this.editRules((text) => rebuildRules(text, (cur) => (cur.includes(line) ? cur : [...cur, line])));
   }
 
+  // 日志：左边一根竖线当时间轴，最新那条是实心节点，其余是空心环。
+  // 一行 = 序号 + 时间 / 标题（可换行）/ 作者·类型·标签 / 正文摘要。
   logCard(fill = 1) {
     const t = theme();
     const all = this.log ?? [];
+    const total = all.length;
     const PER = 20;
     const pages = Math.max(1, Math.ceil(all.length / PER));
     const page = Math.min(Math.max(0, this.logPage ?? 0), pages - 1);
-    const entries = all.slice(page * PER, page * PER + PER);
+    const start = page * PER;
+    const entries = all.slice(start, start + PER);
 
     const body = entries.length
-      ? entries.map((e) => {
+      ? entries.map((e, k) => {
+          const i = start + k; // 全列表里的位置：序号和“最新”都按它算
           // 新格式的标题写在方括号里，正文在方括号外；
           // 老格式（`## [时间] [[作者]] 类型 | 正文`）就从正文里截首句当标题。
           let title = e.title || "";
@@ -1353,69 +1420,51 @@ export default class AbsPanel extends View {
             title = stop > 0 ? head.slice(0, stop + 1) : head;
             detail = stop > 0 ? head.slice(stop + 1).trim() : "";
           }
-          return v_flex()
-            .w_full()
-            .flex_none()
-            .gap(3)
-            .px(7)
-            .py(6)
-            .rounded(7)
+          const meta = [e.who, e.kind, ...(e.tags ?? [])].filter(Boolean).join(" · ");
+          // 最新那条给个实心金点，历史的是空心环。
+          const node = i === 0
+            ? div().size(10).flex_none().rounded(5).bg(TINT.gold)
+            : div().size(10).flex_none().rounded(5).border_1().border_color(t.border).bg(t.background);
+          // 竖线用绝对定位画在行里：第一行从节点中心起、最后一行到节点中心止，
+          // 这样线不会冒出第一个节点和最后一个节点之外。节点圆环填充背景色，把线遮在环内。
+          return h_flex().w_full().flex_none().rounded(8).relative()
             .cursor_pointer()
             .hover((el) => el.bg(t.chrome))
             .on_click(() => this.openDetail("entry", e))
-            // 第一行：标题
-            .child(div().w_full().min_w(0).truncate().text_size(FS_ITEM).font_semibold().text_color(t.foreground).child(title))
-            // 第二行：详情
-            .when(Boolean(detail), (el) =>
-              el.child(div().w_full().min_w(0).truncate().text_size(FS_META).text_color(t.dim).child(detail)),
-            )
-            // 第三行：作者在左、时间在右。
             .child(
-              h_flex()
-                .w_full()
-                .gap(6)
-                .items_center()
-                .child(div().flex_none().text_size(FS_META).text_color(t.dim).child(e.who || ""))
-                .child(div().flex_1())
-                .child(div().flex_none().text_size(FS_META).text_color(t.dim).child(dateOnly(e.when))),
+              div().absolute().left(10).w(1).bg(t.border)
+                .top(k === 0 ? "50%" : 0)
+                .bottom(k === entries.length - 1 ? "50%" : 0),
+            )
+            .child(
+              h_flex().w(20).flex_none().items_center().justify_center().child(node),
+            )
+            .child(
+              v_flex().flex_1().min_w(0).gap(2).px(7).py(5)
+                // 第一行：序号 + 时间
+                .child(
+                  h_flex().w_full().gap(6).items_center()
+                    .child(div().flex_none().text_size(FS_META).text_color(t.dim).child(`#${total - i}`))
+                    .child(div().flex_none().text_size(FS_META).text_color(t.dim).child(dateShort(e.when)))
+                    .child(div().flex_1()),
+                )
+                // 第二行：标题，允许换行
+                .child(div().w_full().min_w(0).text_size(FS_ITEM).font_medium().text_color(t.foreground).child(title))
+                // 第三行：作者 · 类型 · 标签
+                .when(Boolean(meta), (el) =>
+                  el.child(div().w_full().min_w(0).truncate().text_size(FS_META).text_color(t.muted).child(meta)),
+                )
+                // 第四行：正文摘要，一行省略
+                .when(Boolean(detail), (el) =>
+                  el.child(div().w_full().min_w(0).truncate().text_size(FS_META).text_color(t.dim).child(detail)),
+                ),
             );
         })
       : [div().w_full().py(10).text_size(FS_BODY).text_color(t.dim).text_center().child("还没有日志")];
 
-    const btn = (id, label, to, on) =>
-      h_flex()
-        .id(id)
-        .h(20)
-        .px(8)
-        .flex_none()
-        .items_center()
-        .rounded(6)
-        .bg(t.chrome)
-        .text_color(on ? t.foreground : t.dim)
-        .when(on, (x) => x.cursor_pointer().hover((y) => y.bg(t.hover)))
-        .on_click((_e, cx) => {
-          if (!on) return;
-          this.logPage = to;
-          cx.notify();
-        })
-        .child(div().text_size(FS_META).child(label));
+    const footer = this.pager("abs-log", page, pages, (to) => { this.logPage = to; }, this.logScroll);
 
-    // 翻页条固定在卡片底部，不跟着列表滚；只有一页也显示（页码 1，两个按钮置灰）。
-    const footer = h_flex()
-      .w_full()
-      .flex_none()
-      .h(32)
-      .px(8)
-      .gap(8)
-      .items_center()
-      .justify_center()
-      .border_t(1)
-      .border_color(t.border)
-      .child(btn("abs-log-prev", "‹ Prev", page - 1, page > 0))
-      .child(div().text_size(FS_META).text_color(t.muted).child(`${page + 1} / ${pages}`))
-      .child(btn("abs-log-next", "Next ›", page + 1, page < pages - 1));
-
-    return this.card("日志", all.length, body, fill, footer, 0);
+    return this.card("Log", total, body, fill, footer, 0, this.logScroll);
   }
 
   openIn(editor) {
@@ -1492,42 +1541,9 @@ export default class AbsPanel extends View {
       ? shown.map((x) => this.sessRow(x, bg))
       : [div().px(6).py(8).text_size(FS_BODY).text_color(t.dim).child("这个文件夹没有会话")];
 
-    const btn = (id, label, to, on) =>
-      h_flex()
-        .id(id)
-        .h(20)
-        .px(8)
-        .flex_none()
-        .items_center()
-        .rounded(6)
-        .bg(t.chrome)
-        .text_color(on ? t.foreground : t.dim)
-        .when(on, (x) => x.cursor_pointer().hover((y) => y.bg(t.hover)))
-        .on_click((_e, cx) => {
-          if (!on) return;
-          this.sessPage = to;
-          cx.notify();
-        })
-        .child(div().text_size(FS_META).child(label));
+    const footer = this.pager("abs-sess", page, pages, (to) => { this.sessPage = to; }, this.sessScroll);
 
-    // 只有一页也显示翻页条：页码 1，两个按钮置灰。
-    const footer = h_flex()
-      .w_full()
-      .flex_none()
-      .h(32)
-      .px(8)
-      .gap(8)
-      .items_center()
-      .justify_center()
-      .border_t(1)
-      .border_color(t.border)
-      .child(btn("abs-sess-prev", "‹ Prev", page - 1, page > 0))
-      .child(div().text_size(FS_META).text_color(t.muted).child(`${page + 1} / ${pages}`))
-      .child(btn("abs-sess-next", "Next ›", page + 1, page < pages - 1));
-
-    // 当前这一页的 token 数，缺的现数
-    this.sessTokens(cx, shown);
-    return [this.card(this.machine ? `PI会话 · ${this.machine}` : "PI会话", list.length, body, 1, footer, 0)];
+    return [this.card(this.machine ? `Sessions · ${this.machine}` : "Sessions", list.length, body, 1, footer, 0, this.sessScroll)];
   }
 
   sessTargets() {
@@ -1719,18 +1735,26 @@ export default class AbsPanel extends View {
     const t = theme();
     const arming = this.confirmDelete === s.id;
     const title = s.preview || s.id;
+    const tk = this.tokenCache?.[s.file]?.n;
+    // 左边一个节点，颜色看新旧：今天实心绿、三天内蓝环、更早灰环。
+    const fresh = Date.now() - (Number(s.mtime) || 0);
+    const node = fresh < 86_400_000
+      ? div().size(10).flex_none().rounded(5).bg(TINT.green)
+      : fresh < 3 * 86_400_000
+        ? div().size(10).flex_none().rounded(5).border_1().border_color(TINT.blue).bg(t.background)
+        : div().size(10).flex_none().rounded(5).border_1().border_color(t.border).bg(t.background);
     return v_flex()
       .id(`sess-${s.id}`)
       .relative()
       .w_full()
       .flex_none()
-      .gap(3)
+      .gap(2)
       .pl(8)
       // 平时只留正常内边距，不替 × 预留 28px；鼠标落上来时内容整体左移，让出 × 的位置。
       .pr(8)
       .when(arming || this.hoveredSess === s.id, (e) => e.pr(36))
-      .py(7)
-      .rounded(7)
+      .py(5)
+      .rounded(8)
       .when(arming, (e) => e.bg(t.ansi1))
       .cursor_pointer()
       .hover((el) => el.bg(arming ? t.ansi1 : t.chrome))
@@ -1741,16 +1765,21 @@ export default class AbsPanel extends View {
         if (had !== h) cx.notify();
       })
       .on_click((_e, cx) => this.sessResume(s, cx))
-      .child(div().w_full().min_w(0).truncate().text_size(FS_ITEM).font_semibold().text_color(arming ? t.background : t.foreground).child(title))
-      // 第二行：左边时间，右边 token 数
+      .child(
+        h_flex().w_full().gap(7).items_center()
+          .child(node)
+          .child(div().flex_1().min_w(0).truncate().text_size(FS_ITEM).font_medium().text_color(arming ? t.background : t.foreground).child(title)),
+      )
+      // 第二行：时间在左、token 在右，缩进对齐标题
       .child(
         h_flex()
           .w_full()
           .gap(6)
           .items_center()
+          .pl(17)
           .child(div().text_size(FS_META).text_color(t.dim).child(whenText(s.mtime)))
           .child(div().flex_1())
-          .child(div().text_size(FS_META).text_color(t.dim).child(tokensText(this.tokenCache?.[s.file]?.n))),
+          .child(div().flex_none().text_size(FS_META).text_color(t.dim).child(tokensText(tk))),
       )
       // 删除按钮：平时藏着，鼠标落在这一行时在右侧垂直居中冒出来。无背景、不变色。
       .child(
@@ -1787,7 +1816,7 @@ export default class AbsPanel extends View {
     // 只为当前这一页起刷新表。
     this.syncTimers(cx);
     // 会话页、看板页、日志页、端口页的卡片自己滚，外层不再滚。
-    const fillsPanel = view === "sessions" || view === "board" || view === "log" || view === "ports";
+    const fillsPanel = view === "sessions" || view === "board" || view === "log" || view === "ports" || view === "index";
     const body = view === "sessions" ? this.sessCards(cx)
       // 看板：进行中、已完成、日志三张卡片，各自占一份高度、各自在里面滚。
       // 看板：任务卡片按内容高，剩下的高度全给日志。
