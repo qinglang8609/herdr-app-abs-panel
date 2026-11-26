@@ -126,99 +126,141 @@ async function scanRepo(root, on) {
   return repo;
 }
 
-// 泳道配色与间距，参照 VS Code Git Graph（grid.x=24, grid.y=32）。
+// 泳道配色与间距（VS Code Git Graph: grid.x=24, grid.y=32）
 const LANE = ["#4fbf6b", "#e2b45c", "#8fb1ec", "#b48ce0", "#63c7c0", "#e2574c"];
-const LANE_W = 18;   // 列间距
-const ROW_H = 28;    // 行高
+const LANE_W = 18;
+const ROW_H = 28;
+const NULL_ID = -1;
 
-// 移植 VS Code Git Graph 的 determinePath：一条分支一条完整路径，
-// 沿父链一路往下走，每行记一段 (fromCol -> toCol)。渲染时把连续竖直段合并，
-// 只在跨列处画 S 曲线 —— 不存在「半段被占用」，所以不会出现缺口。
-function layoutGraph(commits) {
+// ── 完整移植 VS Code Git Graph 的布局算法 ──
+// Vertex 是一个提交（id = 行号，x = 列），Branch 是一条连续路径，
+// 每条 Branch 有自己的颜色，整条线同色。
+class GVertex {
+  constructor(id) {
+    this.id = id;
+    this.x = 0;
+    this.parents = [];
+    this.children = [];
+    this.nextParent = 0;
+    this.onBranch = null;
+    this.nextX = 0;          // 本行下一个可用列
+    this.connections = [];   // 每列登记的「连到谁 / 属于哪条分支」
+  }
+  getNextParent() { return this.nextParent < this.parents.length ? this.parents[this.nextParent] : null; }
+  registerParentProcessed() { this.nextParent++; }
+  isMerge() { return this.parents.length > 1; }
+  addToBranch(branch, x) { if (this.onBranch === null) { this.onBranch = branch; this.x = x; } }
+  isNotOnBranch() { return this.onBranch === null; }
+  isOnThisBranch(b) { return this.onBranch === b; }
+  getPoint() { return { x: this.x, y: this.id }; }
+  getNextPoint() { return { x: this.nextX, y: this.id }; }
+  // 查「有没有已经连到同一个父、同一条分支的点」，有就复用那列，不再新开
+  getPointConnectingTo(vertex, onBranch) {
+    for (let i = 0; i < this.connections.length; i++) {
+      const c = this.connections[i];
+      if (c && c.connectsTo === vertex && c.onBranch === onBranch) return { x: i, y: this.id };
+    }
+    return null;
+  }
+  registerUnavailablePoint(x, connectsTo, onBranch) {
+    if (x === this.nextX) { this.nextX = x + 1; this.connections[x] = { connectsTo, onBranch }; }
+  }
+  getColour() { return this.onBranch !== null ? this.onBranch.getColour() : 0; }
+}
+
+class GBranch {
+  constructor(colour) { this.colour = colour; this.lines = []; this.end = 0; }
+  addLine(p1, p2, lockedFirst) { this.lines.push({ p1, p2, lockedFirst }); }
+  setEnd(i) { this.end = i; }
+  getColour() { return this.colour; }
+}
+
+function buildGraph(commits) {
   const n = commits.length;
-  const indexOf = new Map();
-  commits.forEach((c, i) => indexOf.set(c.hash, i));
-  const colOf = new Array(n).fill(-1);       // 每个节点最终落在哪列
-  const nextParent = commits.map((c) => {    // 还没处理的父（下标）
-    const ps = (c.parents ?? []).map((h) => indexOf.get(h)).filter((x) => x !== undefined);
-    return ps;
-  });
-  // occupied[row] = Set(列)：这一行哪些列已被别的路径占用
-  const occupied = Array.from({ length: n }, () => new Set());
-  const paths = [];                          // { colour, segs: [{row, from, to}] }
-  const forkColour = {};                     // 列 -> 分叉时定下的颜色
-  const nodeColour = new Array(n).fill(0);   // 每个节点所属分支的颜色
-  let colourSeq = 0;
+  const lookup = new Map();
+  commits.forEach((c, i) => lookup.set(c.hash, i));
+  const vertices = commits.map((_, i) => new GVertex(i));
+  const nullVertex = new GVertex(NULL_ID);
+  for (let i = 0; i < n; i++) {
+    for (const ph of commits[i].parents ?? []) {
+      const pi = lookup.get(ph);
+      if (pi !== undefined) {
+        vertices[i].parents.push(vertices[pi]);
+        vertices[pi].children.push(vertices[i]);
+      } else {
+        vertices[i].parents.push(nullVertex);
+      }
+    }
+  }
 
-  const freeCol = (row, avoid) => {
-    let c = 0;
-    while (occupied[row].has(c) || c === avoid) c++;
-    return c;
+  const branches = [];
+  const availableColours = [];
+  const getAvailableColour = (startAt) => {
+    for (let i = 0; i < availableColours.length; i++) if (startAt > availableColours[i]) return i;
+    availableColours.push(0);
+    return availableColours.length - 1;
   };
 
-  for (let start = 0; start < n; start++) {
-    if (colOf[start] >= 0 && nextParent[start].length === 0) continue;
-    // 起点列：已被别的线安排过就用那个，否则找空位
-    let col = colOf[start] >= 0 ? colOf[start] : freeCol(start, -1);
-    colOf[start] = col;
-    // col 0 是主干，恒用 0 号色（绿）；其它列的颜色在分叉时就已经定好
-    const colour = col === 0 ? 0 : (forkColour[col] ?? 0);
-    nodeColour[start] = colour;
-    occupied[start].add(col);
-    const segs = [];
-    let cur = start;
-    let parent = nextParent[cur].shift();
-    for (let row = start + 1; row < n; row++) {
-      let target;
-      if (parent === row) {
-        // 到父节点了：用它已定的列，或本行的空位
-        target = colOf[row] >= 0 ? colOf[row] : freeCol(row, -1);
-      } else {
-        target = freeCol(row, -1);
+  // 一条路径：从 startAt 出发沿父链走，直到父已在别的分支上
+  const determinePath = (startAt) => {
+    let i = startAt;
+    let vertex = vertices[i];
+    let parentVertex = vertex.getNextParent();
+    let curVertex, curPoint;
+    let lastPoint = vertex.isNotOnBranch() ? vertex.getNextPoint() : vertex.getPoint();
+
+    if (parentVertex !== null && parentVertex.id !== NULL_ID && vertex.isMerge()
+        && !vertex.isNotOnBranch() && !parentVertex.isNotOnBranch()) {
+      // merge 连到两个已经在分支上的顶点：沿路找有没有现成的连接点
+      let found = false;
+      const parentBranch = parentVertex.onBranch;
+      for (i = startAt + 1; i < n; i++) {
+        curVertex = vertices[i];
+        curPoint = curVertex.getPointConnectingTo(parentVertex, parentBranch);
+        if (curPoint !== null) found = true;
+        else curPoint = curVertex.getNextPoint();
+        parentBranch.addLine(lastPoint, curPoint,
+          !found && curVertex !== parentVertex ? lastPoint.x < curPoint.x : true);
+        curVertex.registerUnavailablePoint(curPoint.x, parentVertex, parentBranch);
+        lastPoint = curPoint;
+        if (found) { vertex.registerParentProcessed(); break; }
       }
-      segs.push({ row: row - 1, from: col, to: target });
-      occupied[row].add(target);
-      if (parent === row) {
-        colOf[row] = target;
-        nodeColour[row] = target === 0 ? 0 : colour;
-        cur = row;
-        const hadBranch = nextParent[cur].length === 0 && colOf[cur] >= 0;
-        parent = nextParent[cur].shift();
-        if (parent === undefined) break;
+      return;
+    }
+
+    const branch = new GBranch(getAvailableColour(startAt));
+    vertex.addToBranch(branch, lastPoint.x);
+    vertex.registerUnavailablePoint(lastPoint.x, vertex, branch);
+    for (i = startAt + 1; i < n; i++) {
+      curVertex = vertices[i];
+      curPoint = (parentVertex === curVertex && !parentVertex.isNotOnBranch())
+        ? curVertex.getPoint()
+        : curVertex.getNextPoint();
+      branch.addLine(lastPoint, curPoint, lastPoint.x < curPoint.x);
+      curVertex.registerUnavailablePoint(curPoint.x, parentVertex, branch);
+      lastPoint = curPoint;
+      if (parentVertex === curVertex) {
+        vertex.registerParentProcessed();
+        const parentOnBranch = !parentVertex.isNotOnBranch();
+        parentVertex.addToBranch(branch, curPoint.x);
+        vertex = parentVertex;
+        parentVertex = vertex.getNextParent();
+        if (parentVertex === null || parentOnBranch) break;
       }
-      col = target;
     }
-    // 最后一行之后没有父了：补一段收尾（竖直到行底）
-    if (parent === undefined && segs.length) {
-      const last = segs[segs.length - 1];
-      segs.push({ row: n - 1, from: last.to, to: last.to, tail: true });
-    }
-    paths.push({ colour, segs });
+    if (i === n && parentVertex !== null && parentVertex.id === NULL_ID) vertex.registerParentProcessed();
+    branch.setEnd(i);
+    branches.push(branch);
+    // 关键：记下这条颜色用到第几行结束，下次分配颜色时才知道能不能复用
+    availableColours[branch.getColour()] = i;
+  };
+
+  let i = 0;
+  while (i < n) {
+    if (vertices[i].getNextParent() !== null || vertices[i].isNotOnBranch()) determinePath(i);
+    else i++;
   }
-  // merge 分叉：所有多父提交的额外父，都要补一段「从 merge 行弯到分支第一个节点」的连接。
-  // 分支本身的竖直段由主循环的路径负责；这里只补 merge 到分支起点之间的那一段，
-  // 否则金线是悬空的、连不到主干上。
-  for (let m = 0; m < n; m++) {
-    const ps = (commits[m].parents ?? []).map((h) => indexOf.get(h)).filter((x) => x !== undefined);
-    if (ps.length < 2) continue;
-    const baseCol = colOf[m] < 0 ? 0 : colOf[m];
-    for (let k = 1; k < ps.length; k++) {
-      const extra = ps[k];
-      const targetCol = colOf[extra];
-      if (targetCol === undefined || targetCol === baseCol) continue;
-      const segs = [{ row: m, from: baseCol, to: targetCol }];
-      for (let r = m + 1; r < extra; r++) segs.push({ row: r, from: targetCol, to: targetCol });
-      paths.push({ colour: forkColour[targetCol] ?? 0, segs });
-    }
-  }
-  // 颜色跟着「列」走，不跟路径走：给每个非主干列分配一个颜色，
-  // 节点和竖线都按自己所在列取色。这样无论路径怎么建，col 1 永远是同一个分支色。
-  const usedCols = [...new Set(colOf.filter((c) => c > 0))].sort((a, b) => a - b);
-  usedCols.forEach((c, i) => { forkColour[c] = (i + 1) % LANE.length; });
-  for (let i = 0; i < n; i++) {
-    nodeColour[i] = colOf[i] > 0 ? (forkColour[colOf[i]] ?? 0) : 0;
-  }
-  return commits.map((c, i) => ({ ...c, col: colOf[i] < 0 ? 0 : colOf[i], colour: nodeColour[i], paths, forkColour }));
+  return { vertices, branches };
 }
 
 async function scanLog(root, on) {
@@ -240,7 +282,7 @@ async function scanLog(root, on) {
       head: names.some((n) => n.includes("HEAD")),
     });
   }
-  return layoutGraph(commits);
+  return { commits, graph: buildGraph(commits) };
 }
 
 async function scanBranches(root, on) {
@@ -417,7 +459,9 @@ class ChangesPanel extends View {
     const repo = this.repo;
     if (!repo) { this.log = []; this.branches = []; return; }
     const [log, branches] = await Promise.all([scanLog(repo.root, repo.on), scanBranches(repo.root, repo.on)]);
-    this.log = log; this.branches = branches;
+    this.log = log?.commits ?? [];
+    this.graph = log?.graph ?? null;
+    this.branches = branches;
   }
 
   // 一次 git 写操作：跑完下一轮轮询自然会重扫，失败就把 git 的原话显示出来。
@@ -603,100 +647,58 @@ class ChangesPanel extends View {
     } else if (this.log.length === 0) {
       historyRows.push(div().p(8).text_size(11).text_color(t.dim).child("还没有提交历史"));
     } else {
-      // 一整块画布：先把所有泳道线画成连续路径（分叉/汇合用贝塞尔过渡），再叠文字行。
-      const rows = this.log;
-      const laneCount = Math.max(1, ...rows.map((r) => r.col + 1));
-      // 文字起点跟着实际列数走：单分支时紧跟圆点，有分支才往右让位。
-      const graphW = 8 + (laneCount - 1) * LANE_W + 12;
-      // 渲染照 VS Code Git Graph：每条路径先转成像素点串，
-      // 连续竖直段合并成一条直线，跨列处用固定偏移 d 的 S 曲线。
-      const paths = [];
-      const D = ROW_H * 0.8;          // 曲线控制点偏移（VS Code: grid.y * 0.8）
-      const forkColour = rows[0]?.forkColour ?? {};
+      // 按 VS Code 的模型渲染：每条 branch 一条同色路径，节点颜色跟它所属的分支。
+      const graph = this.graph;
+      const verts = graph?.vertices ?? [];
+      const lanes = Math.max(1, ...verts.map((v) => v.nextX));
       const xOf = (col) => 8 + col * LANE_W;
       const yOf = (row) => row * ROW_H + ROW_H / 2;
-      for (const path of (rows[0]?.paths ?? [])) {
-        const color = LANE[path.colour % LANE.length];
-        // 点串：每段贡献起点和终点
-        const pts = [];
-        for (const sg of path.segs) {
-          const y1 = yOf(sg.row);
-          const y2 = sg.tail ? rows.length * ROW_H : (sg.drop ? yOf(sg.row + 1) : yOf(sg.row + 1));
-          const p1 = { x: xOf(sg.from), y: y1 };
-          const p2 = { x: xOf(sg.to), y: y2 };
-          const last = pts[pts.length - 1];
-          if (!last || last.x !== p1.x || last.y !== p1.y) pts.push(p1);
-          pts.push(p2);
-        }
-        // 合并连续竖直段（VS Code 的 simplify）
-        const keep = [pts[0]];
-        for (let i = 1; i < pts.length; i++) {
-          const prev = keep[keep.length - 1], cur = pts[i], nxt = pts[i + 1];
-          if (nxt && prev.x === cur.x && cur.x === nxt.x && prev.y !== cur.y) continue;  // 中间点可省
-          keep.push(cur);
-        }
-        // 逐段画：竖直直线，跨列 S 曲线
-        const colAt = (x) => Math.round((x - 8) / LANE_W);
-        const colourOf = (col) => LANE[(col === 0 ? 0 : (forkColour[col] ?? col)) % LANE.length];
-        for (let i = 0; i + 1 < keep.length; i++) {
-          const a2 = keep[i], b2 = keep[i + 1];
-          if (a2.x === b2.x) {
-            if (b2.y - a2.y < 0.5) continue;
-            // 竖直段：用这一列自己的颜色（主干恒绿）
-            paths.push({ path: PathBuilder.stroke(1.6).move_to(a2.x, a2.y).line_to(b2.x, b2.y).build(),
-              color: colourOf(colAt(a2.x)) });
+      const colourOfColour = (c) => LANE[(c ?? 0) % LANE.length];
+      const D = ROW_H * 0.8;
+      const paths = [];
+      for (const br of (graph?.branches ?? [])) {
+        const color = colourOfColour(br.colour);
+        for (const ln of br.lines) {
+          const x1 = xOf(ln.p1.x), y1 = yOf(ln.p1.y), x2 = xOf(ln.p2.x), y2 = yOf(ln.p2.y);
+          if (x1 === x2) {
+            if (Math.abs(y2 - y1) < 0.5) continue;
+            paths.push({ path: PathBuilder.stroke(1.6).move_to(x1, y1).line_to(x2, y2).build(), color });
           } else {
-            // 跨列曲线：颜色用「非主干那一侧」（列号大的那列），分叉和汇合都保持分支色。
-            // 端点横向错开 3px，否则曲线起止点正好压在主干的竖线上，看起来像主干断了。
-            const branchCol = Math.max(colAt(a2.x), colAt(b2.x));
-            // 只错开落在主干列上的那一端（避免曲线压住主干线）；分支端保持原位，
-            // 否则下一段竖直线的起点对不上，中间会留 3px 缺口。
-            const trunkX = xOf(0);
-            const xa = Math.abs(a2.x - trunkX) < 0.5 ? a2.x + 3 : a2.x;
-            const xb = Math.abs(b2.x - trunkX) < 0.5 ? b2.x + 3 : b2.x;
             paths.push({ path: PathBuilder.stroke(1.6)
-              .move_to(xa, a2.y)
-              .cubic_bezier_to(xb, b2.y, xa, a2.y + D, xb, b2.y - D)
-              .build(), color: colourOf(branchCol) });
+              .move_to(x1, y1)
+              .cubic_bezier_to(x2, y2, x1, y1 + D, x2, y2 - D)
+              .build(), color });
           }
         }
       }
-      const canvas = div().absolute().left(0).top(0).w(graphW).h(rows.length * ROW_H)
+      const canvas = div().absolute().left(0).top(0).w(lanes * LANE_W + 12).h(verts.length * ROW_H)
         .when(!this.dragging, (e) => e.children(paths.map((p) => window.paint_path(p.path, p.color))));
 
-      // 本行有哪些列活着（节点列 + 穿过的泳道），文字要让到最右那条之后。
-      // 文字只需让开「从上方延续到本行」的泳道；本行才分出去的曲线往下走，不占本行文字位置。
-      const textLeft = (i) => {
-        let right = rows[i].col;
-        for (const p of (rows[0]?.paths ?? [])) {
-          for (const sg of p.segs) {
-            if (sg.row === i - 1 && !sg.tail) right = Math.max(right, sg.to);
-          }
-        }
-        return xOf(right);
-      };
-      const lines = rows.map((r, i) => {
-        const color = LANE[(r.colour ?? r.col) % LANE.length];
-        // 当前提交是空心环，其余是实心圆点
-        const dot = r.head
+      // 文字让开「本行实际用到的列」：单分支时紧跟圆点，有分支穿过才右移。
+      const textLeft = (i) => xOf(Math.max(verts[i]?.nextX ?? 1, 1) - 1) + 10;
+
+      const lines = this.log.map((c, i) => {
+        const v = verts[i];
+        const color = colourOfColour(v?.getColour?.() ?? 0);
+        const dot = c.head
           ? div().size(9).rounded(5).border_2().border_color(color).bg(t.background)
           : div().size(8).rounded(4).bg(color);
-        const dotSize = r.head ? 9 : 8;
+        const size = c.head ? 9 : 8;
         return h_flex().w_full().flex_none().h(ROW_H).items_center().relative()
           .cursor_pointer()
-          .tooltip(`${r.hash} · ${r.when}`)
-          // 圆心精确落在画线的 xOf(col) 上（画布和行都从同一个左边界起算）
-          .child(div().absolute().left(xOf(r.col) - dotSize / 2).top(ROW_H / 2 - dotSize / 2).child(dot))
-          .child(div().w(textLeft(i) + 12).flex_none())
+          .tooltip(`${c.hash} · ${c.when}`)
+          .child(div().absolute().left(xOf(v?.x ?? 0) - size / 2).top(ROW_H / 2 - size / 2).child(dot))
+          .child(div().w(textLeft(i)).flex_none())
           .child(h_flex().flex_1().min_w(0).gap(6).items_center()
-            .child(div().min_w(0).truncate().text_size(11.5).text_color(t.foreground).child(r.subject || "(无标题)"))
-            .when(Boolean(r.author), (x) => x.child(div().flex_none().max_w(60).truncate()
-              .text_size(10).text_color(t.dim).child(r.author))))
-          .when(Boolean(r.branch) && r.head, (x) => x.child(div().flex_none().pl(6).max_w(80).truncate()
-            .text_size(9.5).text_color(color).child(r.branch)));
+            .child(div().min_w(0).truncate().text_size(11.5).text_color(t.foreground).child(c.subject || "(无标题)"))
+            .when(Boolean(c.author), (x) => x.child(div().flex_none().max_w(56).truncate()
+              .text_size(10).text_color(t.dim).child(c.author))))
+          .when(Boolean(c.branch) && c.head, (x) => x.child(div().flex_none().pl(4).max_w(72).truncate()
+            .text_size(9.5).text_color(color).child(c.branch)))
+          .child(div().w(56).flex_none().truncate().text_right().text_size(9.5).text_color(t.dim).child(c.when));
       });
 
-      historyRows.push(div().relative().w_full().h(rows.length * ROW_H)
+      historyRows.push(div().relative().w_full().h(verts.length * ROW_H)
         .child(canvas)
         .child(v_flex().w_full().children(lines)));
     }
@@ -731,7 +733,7 @@ class ChangesPanel extends View {
       // 头部：标题 + 仓库名（可截断）+ 增删 + 刷新
       .child(h_flex().h(34).flex_none().w_full().pl(10).pr(8).gap(4).items_center().border_b(1).border_color(t.border)
         .child(div().flex_none().text_size(12.5).font_semibold().child("Changes"))
-        .when(Boolean(tracking), (e) => e.child(div().flex_none().text_size(10).text_color(t.accent).child(tracking)))
+        .when(Boolean(tracking), (e) => e.child(div().flex_none().text_size(11).text_color("#8fb1ec").child(tracking)))
         .child(div().flex_1().min_w(4))
         .child(iconButton("pull", t, { name: "arrow-down", ghost: true, on: Boolean(repo) && !this.busy, tip: "拉取", fn: (cx) => this.pull(cx) }))
         .child(iconButton("push", t, { name: "arrow-up", ghost: true, on: Boolean(repo) && !this.busy, tip: "推送", fn: (cx) => this.push(cx) })))
