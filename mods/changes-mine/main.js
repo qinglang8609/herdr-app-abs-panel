@@ -126,82 +126,102 @@ async function scanRepo(root, on) {
   return repo;
 }
 
-// 泳道配色：第几条分支用第几个色，跟 Git Graph 一样一眼分得开。
+// 泳道配色：第几条分支用第几个色。间距/行高参照 VS Code Git Graph（24 / 32）。
 const LANE = ["#4fbf6b", "#e2b45c", "#8fb1ec", "#b48ce0", "#63c7c0", "#e2574c"];
-const LANE_W = 20;   // 每条泳道的横向间距
-const ROW_H = 26;    // 每条提交一行的高度
-const NODE_GAP = 6;  // 线段与节点之间留的空隙（VS Code 的线是断开的）
+const LANE_W = 22;   // 泳道横向间距
+const ROW_H = 28;    // 每条提交一行
+const NODE_GAP = 6;  // 线段与节点之间的空隙（线不穿过圆点）
 
-// 用父子关系自己排泳道：lanes[i] 记着「这条线接下来等哪个提交」。
-// 返回每个提交的列号，以及每行要画的连线段（从哪列到哪列）。
+// 把提交拓扑投影成二维图谱。每行拆成上半段(laneIn)和下半段(laneOut)，
+// 曲线吃掉的半段记进 topUsed / botUsed，画竖线时跳过它们 ——
+// 否则直线和曲线重叠，merge 节点旁边就会断层或多一截。
+// 曲线四种语义不能混：
+//   out   本节点分出去到右边新泳道         （吃下半段）
+//   in    别的泳道也等这个 commit，汇入本列（吃上半段）
+//   join  自己是分支 tip，汇回更左边的泳道  （吃下半段）
 function layoutGraph(commits) {
-  const lanes = [];      // 每个槽位等着的 commit hash，null = 空
+  let lanes = [];          // lanes[i] = 这条泳道接下来等哪个 commit
   const rows = [];
-  const laneOf = new Map();
   for (const c of commits) {
-    // 它可能同时被多条线等着（分支末尾与主干指向同一个父）。
-    // 取最右那条：分支要在自己的列上画完最后一个节点，再汇回左边。
+    const laneIn = lanes.slice();
+    // 本节点落在哪条泳道：所有等它的里面取最左
     const waiting = [];
     for (let i = 0; i < lanes.length; i++) if (lanes[i] === c.hash) waiting.push(i);
     let col;
-    if (waiting.length) {
-      col = waiting[0];
-      // 分支末尾：只有一个父，而那个父已经被右边某条线等着 ——
-      // 说明右边那条分支已经走到共同祖先，本提交属于那条分支，画到右边去。
-      const ps = c.parents ?? [];
-      if (ps.length === 1) {
-        const right = lanes.findIndex((h, i) => h === ps[0] && i > col);
-        if (right >= 0) col = right;
-      }
-    } else {                             // 没人等它：新开一条泳道
+    if (waiting.length) col = waiting[0];
+    else {
       col = lanes.indexOf(null);
       if (col < 0) col = lanes.length;
       lanes[col] = c.hash;
     }
-    laneOf.set(c.hash, col);
-    const before = lanes.slice();        // 这一行上半段的线
+
+    const curves = [];
+    const topUsed = new Set();
+    const botUsed = new Set();
     const parents = c.parents ?? [];
-    const p0 = parents[0] ?? null;
-    const joining = [];
-    // 分支末尾（本提交被挪到右边的分支列）：父交回左边原来那列，本列结束。
-    const homeCol = waiting.length ? waiting[0] : col;
-    if (col !== homeCol) {
-      lanes[col] = null;
-      lanes[homeCol] = p0;
-      joining.push({ from: col, to: homeCol });
-    } else {
-      lanes[col] = p0;
-      // 别的槽位也等着同一个父 -> 汇合到本列
-      if (p0) {
-        for (let i = 0; i < lanes.length; i++) {
-          if (i !== col && lanes[i] === p0) { joining.push({ from: i, to: col }); lanes[i] = null; }
-        }
-      }
+
+    // 别的泳道也在等本 commit -> in 曲线汇入本列（吃掉那些泳道的上半段）
+    for (const w of waiting) {
+      if (w === col) continue;
+      curves.push({ kind: "in", from: w, to: col });
+      topUsed.add(w);
+      lanes[w] = null;
     }
-    const extra = [];
+
+    // 第一个父的处理。两种情形要分开：
+    //  a) 右边某条泳道已在等这个父 -> 本 commit 其实是那条分支的最后一个提交，
+    //     把它画到右边那列，父交回本列（主干继续直下），右边那列 join 回来。
+    //  b) 左边某条泳道已在等这个父 -> 本列到此结束，join 过去。
+    const p0 = parents[0] ?? null;
+    if (p0) {
+      const right = lanes.findIndex((h, i) => h === p0 && i > col);
+      const left = lanes.findIndex((h, i) => h === p0 && i < col);
+      if (right >= 0 && waiting.length === 1) {
+        // (a) 挪到分支列：节点画在 right，本列接住父
+        curves.push({ kind: "join", from: right, to: col });
+        botUsed.add(right);
+        lanes[right] = null;
+        lanes[col] = p0;
+        col = right;
+      } else if (left >= 0) {
+        // (b) 本列汇合到左边
+        curves.push({ kind: "join", from: col, to: left });
+        botUsed.add(col);
+        lanes[col] = null;
+      } else {
+        lanes[col] = p0;
+      }
+    } else {
+      lanes[col] = null;   // 根提交，这条泳道结束
+    }
+
+    // 其余父（merge 分叉）：各占一条泳道，一律在右边
     for (let i = 1; i < parents.length; i++) {
       const ph = parents[i];
       let pc = lanes.indexOf(ph);
       if (pc < 0) {
         pc = lanes.indexOf(null);
         if (pc < 0) pc = lanes.length;
+        if (pc <= col) pc = Math.max(lanes.length, col + 1);
         lanes[pc] = ph;
       }
-      extra.push(pc);
+      curves.push({ kind: "out", from: col, to: pc });
+      botUsed.add(pc);
     }
-    // 别的槽位也在等这一行的提交 -> 它们到此汇合进本列
-    const merged = [...joining];
-    // 同一个 hash 被多条线等着时只留最左那条，其余收掉（不重复记已处理的汇合）
+
+    // 同一 hash 被多条泳道等着：只留最左，其余 join 过去
     for (let i = 0; i < lanes.length; i++) {
       const h = lanes[i];
       if (!h) continue;
       const first = lanes.indexOf(h);
-      if (first === i) continue;
-      if (!merged.some((m) => m.from === i)) merged.push({ from: i, to: first });
+      if (first === i || botUsed.has(i)) continue;
+      curves.push({ kind: "join", from: i, to: first });
+      botUsed.add(i);
       lanes[i] = null;
     }
+
     while (lanes.length && lanes[lanes.length - 1] === null) lanes.pop();
-    rows.push({ ...c, col, before, after: lanes.slice(), extra, merged });
+    rows.push({ ...c, col, laneIn, laneOut: lanes.slice(), curves, topUsed, botUsed });
   }
   return rows;
 }
@@ -590,84 +610,79 @@ class ChangesPanel extends View {
     } else {
       // 一整块画布：先把所有泳道线画成连续路径（分叉/汇合用贝塞尔过渡），再叠文字行。
       const rows = this.log;
-      const laneCount = Math.max(1, ...rows.map((r) => Math.max(r.before.length, r.after.length, r.col + 1)));
+      const laneCount = Math.max(1, ...rows.map((r) => Math.max(r.laneIn.length, r.laneOut.length, r.col + 1)));
       const graphW = laneCount * LANE_W + 8;
       const xOf = (col) => 8 + col * LANE_W;
       const paths = [];
+      const yTopOf = (i) => i * ROW_H;
       const yMidOf = (i) => i * ROW_H + ROW_H / 2;
-      // 每一列：从上到下扫一遍，把「有节点的行」当作断点，节点之间连一段线。
-      for (let c = 0; c < laneCount; c++) {
-        const color = LANE[c % LANE.length];
-        // 这一列在哪些行有节点 / 有活着的线
-        const nodeRows = [];
-        for (let i = 0; i < rows.length; i++) if (rows[i].col === c) nodeRows.push(i);
-        if (!nodeRows.length) {
-          // 只是路过的列：从「上一行 after 里出现它」的那一行底部开始，到不再活着为止。
-          let from = -1, to = -1;
-          for (let i = 0; i < rows.length; i++) {
-            if (rows[i].after[c]) { if (from < 0) from = i + 1; to = i + 1; }
-          }
-          if (from >= 0 && to > from) {
-            paths.push({ path: PathBuilder.stroke(1.6).move_to(xOf(c), from * ROW_H).line_to(xOf(c), to * ROW_H).build(), color });
-          }
-          continue;
-        }
-        // 首个节点之前不画竖线：那一段由分叉曲线从父节点弯过来负责。
-        const firstNode = nodeRows[0];
-        // 相邻节点之间：只要这条线一直活着就连，两端各留 NODE_GAP
-        for (let k = 0; k + 1 < nodeRows.length; k++) {
-          const a = nodeRows[k], b = nodeRows[k + 1];
-          let alive = true;
-          for (let i = a; i < b; i++) {
-            if (!rows[i].after[c] || rows[i].merged.some((m) => m.from === c)) { alive = false; break; }
-          }
-          if (!alive) continue;
-          paths.push({ path: PathBuilder.stroke(1.6)
-            .move_to(xOf(c), yMidOf(a) + NODE_GAP)
-            .line_to(xOf(c), yMidOf(b) - NODE_GAP).build(), color });
-        }
-        // 末节点之后：本行已汇合（merged）就不再往下画，那段由汇合曲线负责。
-        const lastNode = nodeRows[nodeRows.length - 1];
-        const closedHere = rows[lastNode].merged.some((m) => m.from === c);
-        if (!closedHere && rows[lastNode].after[c] && lastNode + 1 < rows.length) {
-          paths.push({ path: PathBuilder.stroke(1.6)
-            .move_to(xOf(c), yMidOf(lastNode) + NODE_GAP)
-            .line_to(xOf(c), rows.length * ROW_H).build(), color });
+      const yBotOf = (i) => i * ROW_H + ROW_H;
+      const line = (x, y1, y2, color) => {
+        if (y2 - y1 < 0.5) return;
+        paths.push({ path: PathBuilder.stroke(1.6).move_to(x, y1).line_to(x, y2).build(), color });
+      };
+      // 每条 out/join 曲线从本行一直弯到目标列的下一个节点，
+      // 这段区间里目标列不能再画竖线，否则曲线旁边会多出一条平行线段。
+      const spanSkip = new Map();   // "row:col" -> true
+      for (let i = 0; i < rows.length; i++) {
+        for (const cv of rows[i].curves) {
+          if (cv.kind === "in") continue;
+          let target = i + 1;
+          while (target < rows.length && rows[target].col !== cv.to) target++;
+          const end = Math.min(target, rows.length - 1);
+          for (let k = i + 1; k <= end; k++) spanSkip.set(`${k}:${cv.to}`, true);
         }
       }
-      // 分叉与汇合的曲线（只有这两种地方才弯）
       for (let i = 0; i < rows.length; i++) {
         const r = rows[i];
-        const yMid = yMidOf(i), yBot = (i + 1) * ROW_H;
-        for (const pc of r.extra) {
-          const color = LANE[pc % LANE.length];
-          // 找到这条泳道接下来第一个有节点的行，曲线一直弯到那儿
-          let target = i + 1;
-          while (target < rows.length && rows[target].col !== pc) target++;
-          const yTo = (target < rows.length ? yMidOf(target) : yBot) - NODE_GAP;
-          paths.push({ path: PathBuilder.stroke(1.6)
-            .move_to(xOf(r.col) + 5, yMid + 3)
-            .cubic_bezier_to(xOf(pc), yTo,
-              xOf(r.col) + 10, yMid + (yTo - yMid) * 0.55,
-              xOf(pc), yMid + (yTo - yMid) * 0.45)
-            .build(), color });
+        const yTop = yTopOf(i), yMid = yMidOf(i), yBot = yBotOf(i);
+        const first = i === 0, last = i === rows.length - 1;
+        // 上半段：从上方延续下来的泳道。本列到节点上沿为止，其它列画到行底。
+        for (let c = 0; c < r.laneIn.length; c++) {
+          if (!r.laneIn[c] || r.topUsed.has(c) || spanSkip.has(`${i}:${c}`)) continue;
+          const color = LANE[c % LANE.length];
+          if (c === r.col) { if (!first) line(xOf(c), yTop, yMid - NODE_GAP, color); }
+          else line(xOf(c), yTop, yBot, color);
         }
-        for (const m of r.merged) {
-          const color = LANE[m.from % LANE.length];
-          // 本行就是这条分支的最后一个节点：从它下沿弯到下一行目标节点的上沿。
-          const yFrom = yMid + NODE_GAP;
-          let target = i + 1;
-          while (target < rows.length && rows[target].col !== m.to) target++;
-          const yTo = (target < rows.length ? yMidOf(target) : (i + 1) * ROW_H) - NODE_GAP;
-          paths.push({ path: PathBuilder.stroke(1.6)
-            .move_to(xOf(m.from), yFrom)
-            .cubic_bezier_to(xOf(m.to), yTo,
-              xOf(m.from), yFrom + (yTo - yFrom) * 0.55,
-              xOf(m.to), yFrom + (yTo - yFrom) * 0.45)
-            .build(), color });
+        // 下半段：本行之后还要继续的泳道。本列从节点下沿起。
+        for (let c = 0; c < r.laneOut.length; c++) {
+          if (!r.laneOut[c] || r.botUsed.has(c) || spanSkip.has(`${i}:${c}`)) continue;
+          const color = LANE[c % LANE.length];
+          if (c === r.col) { if (!last) line(xOf(c), yMid + NODE_GAP, yBot, color); }
+          else line(xOf(c), yTop, yBot, color);
+        }
+        // 曲线：out/join 从节点往下弯，in 从上方弯进节点
+        for (const cv of r.curves) {
+          const color = LANE[(cv.kind === "in" ? cv.from : cv.to) % LANE.length];
+          if (cv.kind === "in") {
+            // 别的泳道从上方汇入本节点
+            const yFrom = yTop;
+            const yTo = yMid - NODE_GAP;
+            const dy = yTo - yFrom;
+            paths.push({ path: PathBuilder.stroke(1.6)
+              .move_to(xOf(cv.from), yFrom)
+              .cubic_bezier_to(xOf(cv.to), yTo,
+                xOf(cv.from), yFrom + dy * 0.55,
+                xOf(cv.to), yTo - dy * 0.55)
+              .build(), color });
+          } else {
+            // out / join：} 形。曲线要一直弯到目标泳道下一个节点（或行底），
+            // 只弯到本行底部的话垂直距离仅 8px、横向 22px，必然出现硬拐。
+            const yFrom = yMid + NODE_GAP;
+            let target = i + 1;
+            while (target < rows.length && rows[target].col !== cv.to) target++;
+            const yTo = (target < rows.length ? yMidOf(target) : yBot) - NODE_GAP;
+            const dy = Math.max(yTo - yFrom, ROW_H * 0.8);
+            const dir = cv.to > cv.from ? 1 : -1;
+            paths.push({ path: PathBuilder.stroke(1.6)
+              .move_to(xOf(cv.from) + dir * 4, yFrom - 2)
+              .cubic_bezier_to(xOf(cv.to), yFrom + dy,
+                xOf(cv.from) + dir * 6, yFrom + dy * 0.45,
+                xOf(cv.to), yFrom + dy * 0.55)
+              .build(), color });
+          }
         }
       }
-      // 拖动中跳过画线：几十条 paint_path 是这块最贵的开销，松手后立刻补上。
       const canvas = div().absolute().left(0).top(0).w(graphW).h(rows.length * ROW_H)
         .when(!this.dragging, (e) => e.children(paths.map((p) => window.paint_path(p.path, p.color))));
 
