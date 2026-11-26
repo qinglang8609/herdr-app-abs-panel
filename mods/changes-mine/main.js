@@ -195,37 +195,20 @@ function layoutGraph(commits) {
     }
     paths.push({ colour, segs });
   }
-  // merge 分叉：独立一遍处理所有多父提交。
-  // 不能放在主循环里用 start 判断 —— merge 常在路径中途（例如第 2 行），
-  // start 是路径起点，那时它的父早被消费完了，分叉根本不会建。
+  // merge 分叉：所有多父提交的额外父，都要补一段「从 merge 行弯到分支第一个节点」的连接。
+  // 分支本身的竖直段由主循环的路径负责；这里只补 merge 到分支起点之间的那一段，
+  // 否则金线是悬空的、连不到主干上。
   for (let m = 0; m < n; m++) {
     const ps = (commits[m].parents ?? []).map((h) => indexOf.get(h)).filter((x) => x !== undefined);
     if (ps.length < 2) continue;
     const baseCol = colOf[m] < 0 ? 0 : colOf[m];
     for (let k = 1; k < ps.length; k++) {
       const extra = ps[k];
-      if (colOf[extra] >= 0) continue;               // 已在别的分支上，不用再分
-      const forkCol = freeCol(m, baseCol);
-      occupied[m].add(forkCol);
-      const branchColour = forkCol > 0 ? (++colourSeq) % LANE.length : 0;
-      if (forkCol > 0) forkColour[forkCol] = branchColour;
-      const fsegs = [{ row: m, from: baseCol, to: forkCol }];
-      let cur = extra, prevRow = m;
-      while (cur !== undefined && cur < n) {
-        if (colOf[cur] >= 0) break;                  // 汇合到已有节点（主干）
-        colOf[cur] = forkCol;
-        nodeColour[cur] = forkCol === 0 ? 0 : branchColour;
-        occupied[cur].add(forkCol);
-        for (let row = prevRow + 1; row < cur; row++) {
-          fsegs.push({ row: row - 1, from: forkCol, to: forkCol });
-          occupied[row].add(forkCol);
-        }
-        if (cur > prevRow) fsegs.push({ row: cur - 1, from: forkCol, to: forkCol });
-        prevRow = cur;
-        const np = (commits[cur].parents ?? []).map((h) => indexOf.get(h)).filter((x) => x !== undefined);
-        cur = np[0];
-      }
-      paths.push({ colour: branchColour, segs: fsegs });
+      const targetCol = colOf[extra];
+      if (targetCol === undefined || targetCol === baseCol) continue;
+      const segs = [{ row: m, from: baseCol, to: targetCol }];
+      for (let r = m + 1; r < extra; r++) segs.push({ row: r, from: targetCol, to: targetCol });
+      paths.push({ colour: forkColour[targetCol] ?? 0, segs });
     }
   }
   // 颜色跟着「列」走，不跟路径走：给每个非主干列分配一个颜色，
@@ -663,11 +646,18 @@ class ChangesPanel extends View {
             paths.push({ path: PathBuilder.stroke(1.6).move_to(a2.x, a2.y).line_to(b2.x, b2.y).build(),
               color: colourOf(colAt(a2.x)) });
           } else {
-            // 跨列曲线：用出发列的颜色（分支弯回主干时保持分支色）
+            // 跨列曲线：颜色用「非主干那一侧」（列号大的那列），分叉和汇合都保持分支色。
+            // 端点横向错开 3px，否则曲线起止点正好压在主干的竖线上，看起来像主干断了。
+            const branchCol = Math.max(colAt(a2.x), colAt(b2.x));
+            // 只错开落在主干列上的那一端（避免曲线压住主干线）；分支端保持原位，
+            // 否则下一段竖直线的起点对不上，中间会留 3px 缺口。
+            const trunkX = xOf(0);
+            const xa = Math.abs(a2.x - trunkX) < 0.5 ? a2.x + 3 : a2.x;
+            const xb = Math.abs(b2.x - trunkX) < 0.5 ? b2.x + 3 : b2.x;
             paths.push({ path: PathBuilder.stroke(1.6)
-              .move_to(a2.x, a2.y)
-              .cubic_bezier_to(b2.x, b2.y, a2.x, a2.y + D, b2.x, b2.y - D)
-              .build(), color: colourOf(colAt(a2.x)) });
+              .move_to(xa, a2.y)
+              .cubic_bezier_to(xb, b2.y, xa, a2.y + D, xb, b2.y - D)
+              .build(), color: colourOf(branchCol) });
           }
         }
       }
