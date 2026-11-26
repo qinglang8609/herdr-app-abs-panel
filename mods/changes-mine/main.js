@@ -623,37 +623,56 @@ class ChangesPanel extends View {
       };
       // 每条 out/join 曲线从本行一直弯到目标列的下一个节点，
       // 这段区间里目标列不能再画竖线，否则曲线旁边会多出一条平行线段。
-      const spanSkip = new Map();   // "row:col" -> true
-      for (let i = 0; i < rows.length; i++) {
-        for (const cv of rows[i].curves) {
-          if (cv.kind === "in") continue;
-          // join 的目标列是主干，它要继续直下，不能跳；只有 out 的新分支列才跳。
-          if (cv.kind !== "out") continue;
-          let target = i + 1;
-          while (target < rows.length && rows[target].col !== cv.to) target++;
-          const end = Math.min(target, rows.length - 1);
-          for (let k = i + 1; k <= end; k++) spanSkip.set(`${k}:${cv.to}`, true);
+      // 竖线按列画：同一列相邻两个节点之间连一整段，两端各留 NODE_GAP。
+      // 不按行拼半段 —— 那样某半段被曲线占用跳过时，中间会留下缺口。
+      for (let c = 0; c < laneCount; c++) {
+        const color = LANE[c % LANE.length];
+        const nodeAt = [];
+        for (let i = 0; i < rows.length; i++) if (rows[i].col === c) nodeAt.push(i);
+        // 这一列被曲线接管的行区间（out 的目标列 / join 的起点列）
+        const busy = new Set();
+        for (let i = 0; i < rows.length; i++) {
+          for (const cv of rows[i].curves) {
+            if (cv.kind === "out" && cv.to === c) {
+              let t = i + 1;
+              while (t < rows.length && rows[t].col !== c) t++;
+              for (let k = i; k <= Math.min(t, rows.length - 1); k++) busy.add(k);
+            }
+            if (cv.kind === "join" && cv.from === c) busy.add(i);
+            if (cv.kind === "in" && cv.from === c) busy.add(i);
+          }
+        }
+        if (nodeAt.length) {
+          // 首节点之前：上面有线接着才画
+          const f = nodeAt[0];
+          if (f > 0 && rows[f].laneIn[c] && !busy.has(f - 1)) line(xOf(c), 0, yMidOf(f) - NODE_GAP, color);
+          // 相邻节点之间
+          for (let k = 0; k + 1 < nodeAt.length; k++) {
+            const a2 = nodeAt[k], b2 = nodeAt[k + 1];
+            let blocked = false;
+            for (let i = a2; i <= b2; i++) if (busy.has(i) && i !== a2) { blocked = true; break; }
+            if (blocked) continue;
+            line(xOf(c), yMidOf(a2) + NODE_GAP, yMidOf(b2) - NODE_GAP, color);
+          }
+          // 末节点之后：还有线要继续才画
+          const l = nodeAt[nodeAt.length - 1];
+          if (rows[l].laneOut[c] && !busy.has(l)) line(xOf(c), yMidOf(l) + NODE_GAP, rows.length * ROW_H, color);
+        } else {
+          // 没有节点的列：找它活着的连续区间，整段画
+          let from = -1, to = -1;
+          for (let i = 0; i < rows.length; i++) {
+            if ((rows[i].laneIn[c] || rows[i].laneOut[c]) && !busy.has(i)) {
+              if (from < 0) from = i;
+              to = i;
+            }
+          }
+          if (from >= 0) line(xOf(c), yTopOf(from), yBotOf(to) + ROW_H, color);
         }
       }
+      // 曲线：out/join 从节点往下弯，in 从上方弯进节点
       for (let i = 0; i < rows.length; i++) {
         const r = rows[i];
         const yTop = yTopOf(i), yMid = yMidOf(i), yBot = yBotOf(i);
-        const first = i === 0, last = i === rows.length - 1;
-        // 上半段：从上方延续下来的泳道。本列到节点上沿为止，其它列画到行底。
-        for (let c = 0; c < r.laneIn.length; c++) {
-          if (!r.laneIn[c] || r.topUsed.has(c) || spanSkip.has(`${i}:${c}`)) continue;
-          const color = LANE[c % LANE.length];
-          if (c === r.col) { if (!first) line(xOf(c), yTop, yMid - NODE_GAP, color); }
-          else line(xOf(c), yTop, yBot, color);
-        }
-        // 下半段：本行之后还要继续的泳道。本列从节点下沿起。
-        for (let c = 0; c < r.laneOut.length; c++) {
-          if (!r.laneOut[c] || r.botUsed.has(c) || spanSkip.has(`${i}:${c}`)) continue;
-          const color = LANE[c % LANE.length];
-          if (c === r.col) { if (!last) line(xOf(c), yMid + NODE_GAP, yBot, color); }
-          else line(xOf(c), yTop, yBot, color);
-        }
-        // 曲线：out/join 从节点往下弯，in 从上方弯进节点
         for (const cv of r.curves) {
           // out：新分支的颜色（目标列）；join/in：汇入方自己的颜色（起点列）
           const color = LANE[(cv.kind === "out" ? cv.to : cv.from) % LANE.length];
