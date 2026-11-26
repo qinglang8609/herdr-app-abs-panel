@@ -1,7 +1,18 @@
 # abs（herdr-app 界面）
 
-一套完整的 herdr-app 界面：左侧工作区列表、顶栏、右侧记忆库面板。
-装完和仓库里的一模一样。
+一套完整的 herdr-app 界面：左侧工作区列表、顶栏、右侧记忆库面板，
+再加上文件树弹窗、Git 源码管理面板、侧栏底部的用量统计块。
+四个模块合在这一个仓库里，一次 `install.sh` 全装上。
+
+| 模块 | 作用 |
+|---|---|
+| `mods/abs` | 主界面：工作区列表、顶栏、右侧四个面板（Sessions / Todo / Index / Log）|
+| `mods/files-mine` | 文件树；点文件弹窗看内容（内置 `files` 会把内容挤进窄面板）|
+| `mods/changes-mine` | Git 面板：多仓库、暂存/取消暂存/丢弃、提交、推拉、分支图历史 |
+| `mods/agent2api` | 侧栏底部统计块：Token / 请求 / 缓存命中 / 账号可用 / 可用积分 |
+
+内置的 `files` 和 `changes` 每次启动会被 app 按哈希重置，改不动它们的行为，
+所以这两份是独立模块；`sync-layout.sh` 会把布局里的 `files` / `changes` 换成自己那两份。
 
 ## 一键安装
 
@@ -17,7 +28,15 @@ curl -fsSL https://raw.githubusercontent.com/qinglang8609/herdr-app-abs-panel/ma
 sh install.sh
 ```
 
-装完重启 herdr-app。
+装完重启 herdr-app。默认切到 `abs-stats` 布局（带统计块那份）。
+
+统计块要读自己搭的面板，凭据在 `~/.config/herdr-app/agent2api.json`（600 权限，不进仓库）：
+
+```json
+{ "base": "https://你的面板域名", "username": "...", "password": "..." }
+```
+
+没这个文件时 `install.sh` 会生成模板；已有的不动。
 
 ## 界面
 
