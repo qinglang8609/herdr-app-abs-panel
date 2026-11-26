@@ -194,33 +194,46 @@ function layoutGraph(commits) {
       segs.push({ row: n - 1, from: last.to, to: last.to, tail: true });
     }
     paths.push({ colour, segs });
-    // merge 的其余父：在本行分出一条新列，一路往下接到那个父节点
-    for (const extra of nextParent[start]) {
-      const forkCol = freeCol(start, colOf[start]);
-      occupied[start].add(forkCol);
-      // 分支色从 1 号开始依次递增（0 号留给主干），否则第一条分支会和主干同色。
-      const branchColour = (forkCol > 0) ? (++colourSeq) % LANE.length : 0;
+  }
+  // merge 分叉：独立一遍处理所有多父提交。
+  // 不能放在主循环里用 start 判断 —— merge 常在路径中途（例如第 2 行），
+  // start 是路径起点，那时它的父早被消费完了，分叉根本不会建。
+  for (let m = 0; m < n; m++) {
+    const ps = (commits[m].parents ?? []).map((h) => indexOf.get(h)).filter((x) => x !== undefined);
+    if (ps.length < 2) continue;
+    const baseCol = colOf[m] < 0 ? 0 : colOf[m];
+    for (let k = 1; k < ps.length; k++) {
+      const extra = ps[k];
+      if (colOf[extra] >= 0) continue;               // 已在别的分支上，不用再分
+      const forkCol = freeCol(m, baseCol);
+      occupied[m].add(forkCol);
+      const branchColour = forkCol > 0 ? (++colourSeq) % LANE.length : 0;
       if (forkCol > 0) forkColour[forkCol] = branchColour;
-      // 第一段就是 merge 行的分叉：本列 -> 新列
-      const fsegs = [{ row: start, from: colOf[start], to: forkCol }];
-      let fc = forkCol;
-      for (let row = start + 1; row < n; row++) {
-        const isTarget = row === extra;
-        const target = isTarget ? (colOf[row] >= 0 ? colOf[row] : fc) : freeCol(row, -1);
-        // 这一段画在「上一行」的空间里：从 row-1 的 fc 到 row 的 target
-        fsegs.push({ row: row - 1, from: fc, to: target, drop: true });
-        if (isTarget) {
-          if (colOf[row] < 0) { colOf[row] = target; }
-          nodeColour[row] = target === 0 ? 0 : branchColour;
-          occupied[row].add(target);
-          break;
+      const fsegs = [{ row: m, from: baseCol, to: forkCol }];
+      let cur = extra, prevRow = m;
+      while (cur !== undefined && cur < n) {
+        if (colOf[cur] >= 0) break;                  // 汇合到已有节点（主干）
+        colOf[cur] = forkCol;
+        nodeColour[cur] = forkCol === 0 ? 0 : branchColour;
+        occupied[cur].add(forkCol);
+        for (let row = prevRow + 1; row < cur; row++) {
+          fsegs.push({ row: row - 1, from: forkCol, to: forkCol });
+          occupied[row].add(forkCol);
         }
-        occupied[row].add(target);
-        fc = target;
+        if (cur > prevRow) fsegs.push({ row: cur - 1, from: forkCol, to: forkCol });
+        prevRow = cur;
+        const np = (commits[cur].parents ?? []).map((h) => indexOf.get(h)).filter((x) => x !== undefined);
+        cur = np[0];
       }
       paths.push({ colour: branchColour, segs: fsegs });
     }
-    nextParent[start].length = 0;
+  }
+  // 颜色跟着「列」走，不跟路径走：给每个非主干列分配一个颜色，
+  // 节点和竖线都按自己所在列取色。这样无论路径怎么建，col 1 永远是同一个分支色。
+  const usedCols = [...new Set(colOf.filter((c) => c > 0))].sort((a, b) => a - b);
+  usedCols.forEach((c, i) => { forkColour[c] = (i + 1) % LANE.length; });
+  for (let i = 0; i < n; i++) {
+    nodeColour[i] = colOf[i] > 0 ? (forkColour[colOf[i]] ?? 0) : 0;
   }
   return commits.map((c, i) => ({ ...c, col: colOf[i] < 0 ? 0 : colOf[i], colour: nodeColour[i], paths, forkColour }));
 }
