@@ -2,10 +2,11 @@
 // choice lives in shared("space.icons") as { <space id>: <icon name> }, and
 // the spaces list reads it back (its own fallback is a per-id glyph).
 
-import { View, div, svg } from "gpui-kit";
+import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { props, closeOverlay, setShared, shared, theme } from "herdr";
 import { SPACE_ICONS } from "./space-icons.js";
+import { SPACE_ICON_FILES, MATERIAL_PREFIX } from "./space-icons-material.js";
 
 export default class SpaceIcon extends View {
   current() {
@@ -61,6 +62,39 @@ export default class SpaceIcon extends View {
                 .on_click(() => this.pick(name))
                 .child(svg(`mods/abs/icons/${name}.svg`).size(16).text_color(now === name ? t.foreground : t.muted)),
             ),
+          ),
+      )
+      // 彩色图标：material-icon-theme 那套，存的时候带前缀区分
+      .child(
+        h_flex()
+          .px(8)
+          .pt(8)
+          .pb(4)
+          .text_size(11.5)
+          .text_color(t.dim)
+          .child("Colour icons"),
+      )
+      .child(
+        h_flex()
+          .flex_wrap()
+          .gap(2)
+          .px(4)
+          .children(
+            SPACE_ICON_FILES.map((file) => {
+              const key = MATERIAL_PREFIX + file;
+              return h_flex()
+                .id(`si-mat-${file}`)
+                .size(30)
+                .flex_none()
+                .rounded(7)
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .when(now === key, (el) => el.bg(t.selected))
+                .hover((s) => s.bg(t.hover))
+                .on_click(() => this.pick(key))
+                .child(image(`mods/files-mine/icons/${file}`).w(17).h(17).flex_none());
+            }),
           ),
       )
       .child(

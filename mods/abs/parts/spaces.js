@@ -7,6 +7,7 @@ import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { spaces, agents, machines, panes, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, layout } from "herdr";
 import { SPACE_ICONS } from "./space-icons.js";
+import { isMaterialIcon, materialPath } from "./space-icons-material.js";
 
 // 每个空间正在跑的 agent。一次遍历分组，行渲染时按 id 取。
 function agentMap() {
@@ -589,7 +590,12 @@ export default class Spaces extends View {
           .gap(6)
           .items_center()
           .when(Boolean(tree), el => el.pl(22).child(svg("mods/abs/icons/branch.svg").size(13).text_color(t.dim)))
-          .when(!tree, el => el.child(svg(`mods/abs/icons/${spaceIcon(w.id)}.svg`).size(14).flex_none().text_color(t.muted)))
+          .when(!tree, (el) => {
+            const name = spaceIcon(w.id);
+            return el.child(isMaterialIcon(name)
+              ? image(materialPath(name)).w(15).h(15).flex_none()
+              : svg(`mods/abs/icons/${name}.svg`).size(14).flex_none().text_color(t.muted));
+          })
           .child(div().min_w(0).max_w(110).flex_grow(0).flex_shrink(1).truncate().text_size(12.5).text_color(t.foreground).child(name10(w.name)))
           // 圆圈紧跟在名字后面：名字盒子只占文字宽，不用 min_w 撑宽，否则短名字右边
           // 会空一段、把圆圈推远。名字最多 10 个字母，行尾 git 分支另限 64。
