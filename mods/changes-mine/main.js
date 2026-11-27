@@ -130,6 +130,9 @@ async function scanRepo(root, on) {
 const LANE = ["#4fbf6b", "#e2b45c", "#8fb1ec", "#b48ce0", "#63c7c0", "#e2574c"];
 const LANE_W = 18;
 const ROW_H = 28;
+// Git 历史区的默认高度：写死 12 行 + 标题行，不跟提交条数走——没提交时也不缩成一条。
+// 拖过之后以 changes.gitH 为准，重启也记得。
+const HIST_ROWS = 12;
 const NULL_ID = -1;
 
 // ── 完整移植 VS Code Git Graph 的布局算法 ──
@@ -725,6 +728,31 @@ class ChangesPanel extends View {
           })
       : null;
 
+    // 历史区：默认高度写死，不跟提交条数走；拖过就按拖的算。
+    // 一个 git 仓库都没有就整块不画，高度让给文件区。
+    const histH = this.gitH ?? HIST_ROWS * ROW_H + 42;
+    const history = v_flex().flex_none().h(histH).w_full()
+      // 拖动条：按住上下拖就改 Git 区高度（往上拖变高）。
+      .child(div().id("git-resize").w_full().h(6).flex_none().cursor_row_resize()
+        .bg(this.dragging ? t.accent : t.background)
+        .hover((x) => x.bg(t.hover))
+        .on_mouse_down("left", (e, cx) => {
+          cx.stop_propagation();
+          this.dragging = true;
+          this.dragY = e.position.y;
+          this.dragH = histH;
+          cx.notify();
+        }))
+      .child(h_flex().h(34).flex_none().w_full().pl(10).pr(8).gap(6).items_center().border_b(1).border_color(t.border)
+        .child(ICONS("history", t.muted, 14))
+        .child(div().flex_none().text_size(12.5).font_semibold().text_color(t.foreground).child("Git"))
+        .child(div().flex_1().min_w(4))
+        .child(pill("repo-picker", repo?.name ?? "无仓库", this.picker === "repo", (cx) => { this.picker = this.picker === "repo" ? null : "repo"; cx.notify(); }))
+        .child(pill("branch-picker", repo?.branch || "—", this.picker === "branch", (cx) => { this.picker = this.picker === "branch" ? null : "branch"; cx.notify(); }, false)))
+      .child(div().flex_1().min_h(0).relative()
+        .child(v_flex().id("changes-history").absolute().inset_0().overflow_y_scroll().px(6).py(4).children(historyRows))
+        .child(Scrollbar.vertical("changes-history").absolute().inset_0()));
+
     return v_flex().id("changes-mine").size_full().min_h(0).w_full().relative().rounded(10).overflow_hidden().bg(t.background)
       .border_1().border_color(t.border).text_color(t.foreground).text_size(13).track_focus(this.handle)
       .on_key_down((e, cx) => {
@@ -762,28 +790,8 @@ class ChangesPanel extends View {
             .child(this.loading ? "扫描中…" : repo?.error || (this.repos.length ? "没有未提交的改动" : "这个目录下没有 git 仓库")))))
         .child(Scrollbar.vertical("changes-files").absolute().inset_0()))
       .when(Boolean(this.note), (e) => e.child(div().w_full().px(10).pb(4).text_size(10.5).text_color(t.ansi1).child(this.note)))
-      // 历史：按剩余空间伸缩（最小 120），不再写死高度；标题行带仓库/分支切换
-      .child(v_flex().flex_none().h(this.gitH ?? Math.min(this.log.length || 1, 12) * ROW_H + 42).w_full()
-        // 拖动条：按住上下拖就改 Git 区高度（往上拖变高）。
-        .child(div().id("git-resize").w_full().h(6).flex_none().cursor_row_resize()
-          .bg(this.dragging ? t.accent : t.background)
-          .hover((x) => x.bg(t.hover))
-          .on_mouse_down("left", (e, cx) => {
-            cx.stop_propagation();
-            this.dragging = true;
-            this.dragY = e.position.y;
-            this.dragH = this.gitH ?? Math.min(this.log.length || 1, 12) * ROW_H + 42;
-            cx.notify();
-          }))
-        .child(h_flex().h(34).flex_none().w_full().pl(10).pr(8).gap(6).items_center().border_b(1).border_color(t.border)
-          .child(ICONS("history", t.muted, 14))
-          .child(div().flex_none().text_size(12.5).font_semibold().text_color(t.foreground).child("Git"))
-          .child(div().flex_1().min_w(4))
-          .child(pill("repo-picker", repo?.name ?? "无仓库", this.picker === "repo", (cx) => { this.picker = this.picker === "repo" ? null : "repo"; cx.notify(); }))
-          .child(pill("branch-picker", repo?.branch || "—", this.picker === "branch", (cx) => { this.picker = this.picker === "branch" ? null : "branch"; cx.notify(); }, false)))
-        .child(div().flex_1().min_h(0).relative()
-          .child(v_flex().id("changes-history").absolute().inset_0().overflow_y_scroll().px(6).py(4).children(historyRows))
-          .child(Scrollbar.vertical("changes-history").absolute().inset_0())))
+      // 历史：标题行带仓库/分支切换；没仓库就不画
+      .when(Boolean(repo), (e) => e.child(history))
       .when(Boolean(dragCatcher), (e) => e.child(dragCatcher))
   }
 }

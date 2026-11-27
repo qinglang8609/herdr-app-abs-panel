@@ -228,6 +228,8 @@ export default class Stats extends View {
         this.data = {
           tokens: ov.tokens ?? 0,
           topModels,
+          // 模型总数：堆叠条要把“前 5 名之外还有多少”写进那一段的悬停提示里
+          modelCount: (sum?.data?.models ?? []).length,
           requests: ov.requests ?? 0,
           ok: ov.successful ?? 0,
           // 和面板「缓存命中率」一致：取近 10 分钟那一档，不用全范围的 overview.cacheRate。
@@ -284,26 +286,36 @@ export default class Stats extends View {
     // 段色：跟下面三行的填充色同一套亮度（大红、金、绿、蓝、紫）。
     const TINT = ["#c0503f", "#c99a3e", "#4fbf6b", "#5e8fd8", "#9b6bc8"];
 
-    // 一根堆叠条：按模型占比分段。
-    const stack = (models, total) =>
-      h_flex()
+    // 一根堆叠条：按模型占比分段，段加起来正好 100%（顶到右边）。
+    // 前 TOP_MODELS 名之外的模型合成一段：只画前几名会剩下一截背景色，
+    // 深色主题里 border 和条底色差不多（eva-dark #3e4148 / 底 #282c34），
+    // 拿它当填充看着就是一块黑空白。
+    const stack = (models, total, count) => {
+      const covered = models.reduce((n, [, v]) => n + v, 0);
+      const rest = total - covered;
+      const tail = Math.max(0, (count || models.length) - models.length);
+      const segs = rest > 0
+        ? [...models.map(([name, v], k) => [name, v, TINT[k % TINT.length]]), [`其余 ${tail} 个模型`, rest, t.muted]]
+        : models.map(([name, v], k) => [name, v, TINT[k % TINT.length]]);
+      return h_flex()
         .w_full()
         .h(4)
         .rounded(2)
         .overflow_hidden()
         .bg(t.raised)
         .children(
-          models.map(([name, v], k) =>
+          segs.map(([name, v, color], k) =>
             div()
               .h(4)
-              .bg(TINT[k % TINT.length])
+              .bg(color)
               // 只有首尾两段带单边圆角，段与段之间保持直边。
               .when(k === 0, (el) => el.rounded_l(2))
-              .when(k === models.length - 1, (el) => el.rounded_r(2))
+              .when(k === segs.length - 1, (el) => el.rounded_r(2))
               .tooltip(`${name}  ${fmt(v)}${total ? `  ${((v / total) * 100).toFixed(1)}%` : ""}`)
               .flex_grow(Math.max(0.0001, total ? v / total : 0)),
           ),
         );
+    };
 
     // 没配凭据：整块不占位置（布局节点仍在，只是画成空）。
     if (this.hidden) return div().size(0);
@@ -343,7 +355,7 @@ export default class Stats extends View {
               .child(div().flex_1())
               .child(div().text_size(11).text_color(t.dim).child(fmt(d.tokens))),
           )
-          .child(stack(d.topModels, d.tokens)),
+          .child(stack(d.topModels, d.tokens, d.modelCount)),
       )
       // 请求数据：成功 / 总，条 = 成功率
       .child(row("请求数据", `${num(d.ok)} / ${num(d.requests)}`, rate, null, "#4fbf6b"))

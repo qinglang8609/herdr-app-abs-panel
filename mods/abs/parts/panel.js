@@ -630,6 +630,7 @@ export default class AbsPanel extends View {
     this.brainOn = null;
     this.todo = { doing: [], done: [] };
     this.index = { sections: [], rules: [] };
+    this.indexOpen = {};   // 图谱页展开了哪几个分类
     this.log = [];
     this.logPage = 0;
     this.logScroll = ScrollHandle.new(); // 翻页后用它把列表拉回顶部
@@ -1142,19 +1143,7 @@ export default class AbsPanel extends View {
       });
       return;
     }
-    if (kind === "section") {
-      openOverlay({
-        mod: "abs-detail", kind: "dialog", width: 640, height: 520,
-        props: {
-          title: item.title || item.name,
-          meta: [`${item.items.length} 条`],
-          body: item.items.length
-            ? item.items.map((x) => `- [[${x.name}]]${x.about ? " — " + x.about : ""}`)
-            : ["这个分类下还没有条目。"],
-        },
-      });
-      return;
-    }
+    if (kind === "page") { this.openPage(item); return; }
     openOverlay({
       mod: "abs-detail", kind: "dialog", width: 640, height: 420,
       props: {
@@ -1163,6 +1152,40 @@ export default class AbsPanel extends View {
         body: [item.line ?? ""],
       },
     });
+  }
+
+  // 图谱页里的一页：读那份 .md 原文，整份丢进弹窗。读不到也弹，正文写明找过的路径。
+  async openPage(item) {
+    const base = this.brainDir;
+    const on = this.brainOn;
+    const file = base ? await this.pagePath(base, on, item.name, item.section) : null;
+    const text = file ? await readTextFile(file, { on }).catch(() => null) : null;
+    openOverlay({
+      mod: "abs-detail", kind: "dialog", width: 680, height: 560,
+      props: {
+        title: item.name,
+        meta: [item.section].filter(Boolean),
+        body: text != null
+          ? text.split("\n")
+          : [`读不到这份文档：${file ?? `${base ?? ".brain"} 下没找到 ${item.name}.md`}`],
+      },
+    });
+  }
+
+  // 条目名 → 文件路径：先拿分类名当目录名猜（concepts/、sources/…），
+  // 猜不中再在 .brain 里找两层内的同名 .md。查到的缓存住，重复点不再 find。
+  async pagePath(base, on, name, section) {
+    this.pagePaths ??= {};
+    const key = `${base}|${name}`;
+    if (key in this.pagePaths) return this.pagePaths[key];
+    const guess = section ? `${base}/${String(section).toLowerCase()}/${name}.md` : null;
+    let file = guess && (await readTextFile(guess, { on }).catch(() => null)) != null ? guess : null;
+    if (!file) {
+      const r = await exec("sh", ["-c", 'find "$1" -maxdepth 2 -type f -name "$2.md" 2>/dev/null | head -1', "find", base, String(name)], { on }).catch(() => null);
+      file = String(r?.stdout ?? "").trim() || null;
+    }
+    this.pagePaths[key] = file;
+    return file;
   }
 
   // 一条任务：左边圆圈、标题单行省略、时间靠右，注释缩进在下一行。
@@ -1337,18 +1360,32 @@ export default class AbsPanel extends View {
     const t = theme();
     // index.md 里出现的每个 ## 分类都列出来，空的也列（显示 0 页），
     // 不按名字排除、也不因没条目就吞掉。
+    // 两层：分类一行，默认折叠；点分类展开它底下的页，再点收回去，点页弹文档内容。
     const sections = this.index.sections ?? [];
+    const open = this.indexOpen ?? {};
+    const rows = sections.flatMap((s, i) => [
+      h_flex().w_full().flex_none().gap(7).items_center().px(7).py(5).rounded(8)
+        .cursor_pointer().hover((el) => el.bg(t.chrome))
+        .on_click((_e, cx) => {
+          this.indexOpen = { ...open, [s.name]: !open[s.name] };
+          cx.notify();
+        })
+        .child(div().size(10).flex_none().rounded(5).bg(TINTS[i % TINTS.length]))
+        .child(div().flex_1().min_w(0).truncate().text_size(FS_ITEM).font_medium().text_color(t.foreground).child(s.name))
+        .child(div().text_size(FS_META).text_color(t.dim).child(`${s.items.length || s.stated || 0} pages`))
+        .child(div().size(12).flex_none().text_size(FS_META).text_color(t.dim).child(open[s.name] ? "▾" : "▸")),
+      // 第二层：展开后缩进列出页，对齐分类名（点 10 + 间距 7 + 内边距 7）。
+      ...(open[s.name] ? s.items.map((x) => v_flex().w_full().flex_none().gap(1).pl(24).pr(7).py(4).rounded(8)
+        .cursor_pointer().hover((el) => el.bg(t.chrome))
+        .on_click(() => this.openDetail("page", { ...x, section: s.name }))
+        .child(div().w_full().min_w(0).truncate().text_size(FS_BODY).text_color(t.foreground).child(x.name))
+        .when(Boolean(x.about), (el) =>
+          el.child(div().w_full().min_w(0).truncate().text_size(FS_META).text_color(t.dim).child(x.about)))) : []),
+    ]);
     return this.card(
       "Index",
-      `${(this.index.sections ?? []).reduce((n, s) => n + (s.items.length || s.stated || 0), 0)} pages`,
-      [
-        ...(sections.length ? sections.map((s, i) => h_flex().w_full().flex_none().gap(7).items_center().px(7).py(5).rounded(8)
-          .cursor_pointer().hover((el) => el.bg(t.chrome))
-          .on_click(() => this.openDetail("section", s))
-          .child(div().size(10).flex_none().rounded(5).bg(TINTS[i % TINTS.length]))
-          .child(div().flex_1().min_w(0).truncate().text_size(FS_ITEM).font_medium().text_color(t.foreground).child(s.name))
-          .child(div().text_size(FS_META).text_color(t.dim).child(`${s.items.length || s.stated || 0} pages`))) : [div().px(6).text_size(FS_BODY).text_color(t.dim).child("索引为空")]),
-      ],
+      `${sections.reduce((n, s) => n + (s.items.length || s.stated || 0), 0)} pages`,
+      [...(rows.length ? rows : [div().px(6).text_size(FS_BODY).text_color(t.dim).child("索引为空")])],
       1, // 撑满剩下的高度，分类多的时候在卡片里滚
       null,
       0,
@@ -1442,7 +1479,7 @@ export default class AbsPanel extends View {
   }
 
   // 日志：左边一根竖线当时间轴，最新那条是实心节点，其余是空心环。
-  // 一行 = 序号 + 时间 / 标题（可换行）/ 作者·类型·标签 / 正文摘要。
+  // 一行 = 标题（可换行）/ 作者·时间·类型·标签 / 正文摘要。
   logCard(fill = 1) {
     const t = theme();
     const all = this.log ?? [];
@@ -1456,7 +1493,7 @@ export default class AbsPanel extends View {
 
     const body = entries.length
       ? entries.map((e, k) => {
-          const i = start + k; // 全列表里的位置：序号和“最新”都按它算
+          const i = start + k; // 全列表里的位置：“最新”按它算，翻到第二页就没有最新了
           // 新格式的标题写在方括号里，正文在方括号外；
           // 老格式（`## [时间] [[作者]] 类型 | 正文`）就从正文里截首句当标题。
           let title = e.title || "";
@@ -1467,7 +1504,7 @@ export default class AbsPanel extends View {
             title = stop > 0 ? head.slice(0, stop + 1) : head;
             detail = stop > 0 ? head.slice(stop + 1).trim() : "";
           }
-          const meta = [e.who, e.kind, ...(e.tags ?? [])].filter(Boolean).join(" · ");
+          const meta = [e.who, dateShort(e.when), e.kind, ...(e.tags ?? [])].filter(Boolean).join(" · ");
           // 最新那条给个实心金点，历史的是空心环。
           const node = i === 0
             ? div().size(10).flex_none().rounded(5).bg(TINT.gold)
@@ -1488,20 +1525,13 @@ export default class AbsPanel extends View {
             )
             .child(
               v_flex().flex_1().min_w(0).gap(2).px(7).py(5)
-                // 第一行：序号 + 时间
-                .child(
-                  h_flex().w_full().gap(6).items_center()
-                    .child(div().flex_none().text_size(FS_META).text_color(t.dim).child(`#${total - i}`))
-                    .child(div().flex_none().text_size(FS_META).text_color(t.dim).child(dateShort(e.when)))
-                    .child(div().flex_1()),
-                )
-                // 第二行：标题，允许换行
+                // 第一行：标题，允许换行
                 .child(div().w_full().min_w(0).text_size(FS_ITEM).font_medium().text_color(t.foreground).child(title))
-                // 第三行：作者 · 类型 · 标签
+                // 第二行：作者 · 时间 · 类型 · 标签
                 .when(Boolean(meta), (el) =>
                   el.child(div().w_full().min_w(0).truncate().text_size(FS_META).text_color(t.muted).child(meta)),
                 )
-                // 第四行：正文摘要，一行省略
+                // 第三行：正文摘要，一行省略
                 .when(Boolean(detail), (el) =>
                   el.child(div().w_full().min_w(0).truncate().text_size(FS_META).text_color(t.dim).child(detail)),
                 ),
@@ -1584,6 +1614,8 @@ export default class AbsPanel extends View {
     const page = Math.min(Math.max(0, this.sessPage ?? 0), pages - 1);
     this.sessPage = page;
     const shown = list.slice(page * PER, page * PER + PER);
+    // 只给这一页的会话数 token；缓存按文件 + mtime，没变就不重算。
+    this.sessTokens(cx, shown);
 
     const body = shown.length
       ? shown.map((x) => this.sessRow(x, bg))
@@ -1820,16 +1852,16 @@ export default class AbsPanel extends View {
           .child(node)
           .child(div().flex_1().min_w(0).truncate().text_size(FS_ITEM).font_medium().text_color(arming ? t.background : t.foreground).child(title)),
       )
-      // 第二行：时间在左、token 在右，缩进对齐标题
+      // 第二行：token 在左、时间跟在后面，缩进对齐标题
       .child(
         h_flex()
           .w_full()
           .gap(6)
           .items_center()
           .pl(17)
-          .child(div().text_size(FS_META).text_color(t.dim).child(whenText(s.mtime)))
-          .child(div().flex_1())
-          .child(div().flex_none().text_size(FS_META).text_color(t.dim).child(tokensText(tk))),
+          .child(div().flex_none().text_size(FS_META).text_color(t.dim).child(tokensText(tk)))
+          .child(div().flex_none().text_size(FS_META).text_color(t.dim).child(whenText(s.mtime)))
+          .child(div().flex_1()),
       )
       // 删除按钮：平时藏着，鼠标落在这一行时在右侧垂直居中冒出来。无背景、不变色。
       .child(
