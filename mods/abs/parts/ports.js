@@ -790,7 +790,15 @@ export default class Ports extends View {
         .child(div().text_size(12.5).font_semibold().text_color(t.foreground).child("端口转发"))
         .child(div().px(5).rounded(4).bg(t.chrome).text_size(10).text_color(t.muted).child(server.machine))
         .when(this.items.length > 0, (e) => e.child(div().px(5).rounded(4).bg(t.chrome).text_size(10).text_color(t.muted).child(`${this.items.length} 条`)))
-        .child(div().flex_1()))
+        .child(div().flex_1())
+        // 新增：放在标题行最右，只有个大 +，不带圆角边框
+        .when(!this.form, (e) => e.child(
+          h_flex().size(32).flex_none().items_center().justify_center().cursor_pointer()
+            .text_color(t.dim)
+            .hover((s) => s.text_color(t.foreground))
+            .tooltip("新增转发")
+            .on_click((_e, cx) => { this.openForm("add"); cx.notify(); })
+            .child(svg(icon("plus")).size(20)))))
       .child(div().flex_1().min_h(0).overflow_y_scrollbar().child(
         v_flex().px(6).py(5).gap(6).w_full()
           .when(this.note != null, (x) => x.child(div().px(9).py(7).rounded(7).bg(t.raised).border_1().border_color(t.border).text_size(11.5).text_color(t.ansi3).child(this.note)))
@@ -804,14 +812,6 @@ export default class Ports extends View {
                 .children(list.map((it) => this.itemRow(it, t))),
             ),
           )),
-      ))
-      .when(!this.form, (e) => e.child(
-        h_flex().px(9).pb(8).pt(4).flex_none().justify_center()
-          .child(h_flex().w(28).h(28).items_center().justify_center().rounded(7).cursor_pointer()
-            .text_color(t.dim).border_1().border_color(t.border)
-            .hover((s) => s.bg(t.chrome).text_color(t.foreground))
-            .on_click((_e, cx) => { this.openForm("add"); cx.notify(); })
-            .child(svg(icon("plus")).size(14))),
       ));
   }
 }

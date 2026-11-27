@@ -765,8 +765,8 @@ class ChangesPanel extends View {
         .child(div().flex_1().min_w(4))
         .child(iconButton("pull", t, { name: "arrow-down", ghost: true, on: Boolean(repo) && !this.busy, tip: "拉取", fn: (cx) => this.pull(cx) }))
         .child(iconButton("push", t, { name: "arrow-up", ghost: true, on: Boolean(repo) && !this.busy, tip: "推送", fn: (cx) => this.push(cx) })))
-      // 提交：AI 生成和提交两个按钮都内嵌在输入框右端
-      .child(div().flex_none().w_full()
+      // 提交：AI 生成和提交两个按钮都内嵌在输入框右端；没仓库就不画这一条
+      .when(Boolean(repo), (e) => e.child(div().flex_none().w_full()
         .child(div().relative().w_full().h(38)
           .child(div().id("commit-message").w_full().h_full().pl(10).pr(34).flex().items_center()
             .border_b(1).border_color(this.typing ? t.accent : t.border).cursor_text()
