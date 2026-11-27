@@ -610,6 +610,10 @@ class ChangesPanel extends View {
     else this.refreshIfDue(cx);
     const t = theme();
     const repo = this.repo, files = this.files;
+    // 算得上“有 git”的仓库：找到了根，而且 git status 跑得通。
+    // 找到根但 status 失败（目录里残留一个坏 .git、或权限/owner 不对）也当没仓库，
+    // 否则界面上会出现一个什么都干不了的提交框。
+    const hasRepo = Boolean(repo) && !repo.error;
     const staged = files.filter((f) => f.staged), unstaged = files.filter((f) => !f.staged);
     const add = files.reduce((n, f) => n + (f.add || 0), 0), del = files.reduce((n, f) => n + (f.del || 0), 0);
     const canCommit = Boolean(this.message.trim() && repo?.staged.length && !this.busy && !this.loading);
@@ -766,7 +770,7 @@ class ChangesPanel extends View {
         .child(iconButton("pull", t, { name: "arrow-down", ghost: true, on: Boolean(repo) && !this.busy, tip: "拉取", fn: (cx) => this.pull(cx) }))
         .child(iconButton("push", t, { name: "arrow-up", ghost: true, on: Boolean(repo) && !this.busy, tip: "推送", fn: (cx) => this.push(cx) })))
       // 提交：AI 生成和提交两个按钮都内嵌在输入框右端；没仓库就不画这一条
-      .when(Boolean(repo), (e) => e.child(div().flex_none().w_full()
+      .when(hasRepo, (e) => e.child(div().flex_none().w_full()
         .child(div().relative().w_full().h(38)
           .child(div().id("commit-message").w_full().h_full().pl(10).pr(34).flex().items_center()
             .border_b(1).border_color(this.typing ? t.accent : t.border).cursor_text()
@@ -791,7 +795,7 @@ class ChangesPanel extends View {
         .child(Scrollbar.vertical("changes-files").absolute().inset_0()))
       .when(Boolean(this.note), (e) => e.child(div().w_full().px(10).pb(4).text_size(10.5).text_color(t.ansi1).child(this.note)))
       // 历史：标题行带仓库/分支切换；没仓库就不画
-      .when(Boolean(repo), (e) => e.child(history))
+      .when(hasRepo, (e) => e.child(history))
       .when(Boolean(dragCatcher), (e) => e.child(dragCatcher))
   }
 }
