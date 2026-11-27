@@ -782,7 +782,7 @@ class ChangesPanel extends View {
             .when(canCommit, (e) => e.cursor_pointer().hover((x) => x.bg(t.hover)))
             .on_click((_e, cx) => { if (canCommit) this.commit(cx); })
             .tooltip("提交已暂存的改动")
-            .child(ICONS("check", canCommit ? t.solid_foreground : t.dim, 13)))))
+            .child(ICONS("check", canCommit ? t.solid_foreground : t.dim, 13))))))
       // 文件：已暂存 / 已更改。有改动才撑高，没改动缩成一行，把空间让给历史。
       .child(div().flex_grow(1).flex_basis(0).min_h(36).w_full().relative().border_b(1).border_color(t.border)
         .child(v_flex().id("changes-files").absolute().inset_0().overflow_y_scroll().px(6).py(4)
