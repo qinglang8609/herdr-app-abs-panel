@@ -2,7 +2,16 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
 import { FOR_EXT, FOR_NAME, FOR_DIR, FILE, FOLDER, FOLDER_OPEN } from "./icons-map.js";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window, props, openOverlay, closeOverlay } from "herdr";
+import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, props, openOverlay, closeOverlay, notify } from "herdr";
+
+// 远程写文件：writeTextFile 只管本机；远程走 sh + heredoc（base64 在部分机器上被拒）。
+async function shellWrite(path, text, on) {
+  const d = "FV_EOF_" + Math.random().toString(36).slice(2, 10);
+  // 先写同目录临时文件再 mv：中途断连不会留下半截文件（mv 同盘是原子的）。
+  // heredoc 结束行后面用 ; 接命令，不能用换行后的 &&（那会被当成新命令，语法错误）。
+  const r = await exec("sh", ["-c", `t="$1.tmp.$$"; cat > "$t" <<'${d}'\n${text}\n${d}\nrc=$?; if [ "$rc" -eq 0 ]; then mv -f "$t" "$1"; else rm -f "$t"; fi; exit $rc`, "fv-write", path], { on });
+  if (!r || r.code !== 0) throw new Error((r?.stderr || "写入失败").trim().slice(0, 120) || "写入失败");
+}
 
 // The panels share data in one VM, but their host tasks belong to separate copies.
 const scans = globalThis[Symbol.for("herdr.repoStatus.v2")] ??= new Map();
@@ -245,12 +254,13 @@ class Browser extends View {
     cx.notify();
   }
 
-  // 点文件不挤进这个面板：弹一个浮窗，里面是只读的语法高亮内容。
+  // 点文件不挤进这个面板：弹一个浮窗，本机远程都可编辑保存。
   openViewer(path) {
     if (!this.root) return;
     openOverlay({
       mod: "files-mine",
       kind: "dialog",
+      modal: true,
       width: 0.82,
       height: 0.82,
       props: { part: "viewer", path, root: this.root, on: this.on },
@@ -311,12 +321,16 @@ class Browser extends View {
   }
 }
 
-// 浮窗里的文件内容：只读、带语法高亮，顶部是文件名和关闭按钮。
+// 浮窗里的文件内容：带语法高亮，本机远程都可编辑、Cmd/Ctrl-S 保存。
+// 关窗时有未保存的改动先在窗内确认（确认期间编辑器让位成静态预览，
+// retained 控件画在一切自绘元素之上，只能请它离开）。
 class Viewer {
   init(_p, cx) {
     this.p = props() ?? {};
     this.code = null;
     this.error = null;
+    this.dirty = false;
+    this.confirming = false;
     this.load(cx);
   }
 
@@ -329,12 +343,19 @@ class Viewer {
         if (text === null) { this.error = "This file is no longer available"; return; }
         if (text.includes("\0")) { this.error = "Binary file · no text preview"; return; }
         const t = theme(), ext = path.includes(".") ? path.split(".").pop() : "txt";
+        this.saved = text;
+        // 超过 400KB 的只给看前半截：截断的内容存回去会把后半截丢掉，所以强制只读。
+        const truncated = text.length > 400000;
+        this.readonly = truncated;
         this.code = EditorState.new({
           language: LANG[ext] ?? ext,
-          readonly: true,
-          value: text.length > 400000 ? text.slice(0, 400000) + "\n… (file truncated)" : text,
+          readonly: truncated,
+          soft_wrap: true,
+          value: truncated ? text.slice(0, 400000) + "\n… (file too long, readonly)" : text,
           syntax: { keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1, constant: t.ansi6 },
         });
+        // 第一次改动就置脏，不在每次按键里全量取文本比对。
+        this.code.on("change", () => { if (!this.dirty) { this.dirty = true; cx.notify(); } });
       } catch {
         this.error = "Cannot preview this file (binary, too large, or unreadable)";
       } finally {
@@ -343,24 +364,113 @@ class Viewer {
     });
   }
 
+  // 保存：expected 带原文，别处先改过就拒绝。closeAfter：确认框里的「保存」。
+  save(cx, closeAfter = false) {
+    if (!this.code || this.saving || this.readonly) return;
+    const path = `${this.p.root}/${this.p.path}`;
+    const on = this.p.on;
+    const text = this.code.value();
+    this.saving = true;
+    cx.spawn(async cx => {
+      try {
+        if (on) {
+          // 远程：先重读确认没被别人改过，再走 sh + heredoc 写回。
+          const cur = await readTextFile(path, { on });
+          if (cur !== this.saved) throw new Error("文件在远程已被别人改过，保存拒绝");
+          await shellWrite(path, text, on);
+        } else {
+          await writeTextFile(path, text, this.saved);
+        }
+        this.saved = text;
+        this.dirty = false;
+        notify({ title: "已保存", body: this.p.path.split("/").pop(), level: "success", timeout: 2500 });
+        if (closeAfter) { this.code?.release(); closeOverlay(this.p.overlay); return; }
+      } catch (e) {
+        notify({ title: "保存失败", body: String(e).slice(0, 100), level: "error", timeout: 4000 });
+        this.confirming = false;
+      } finally {
+        this.saving = false;
+        cx.notify();
+      }
+    });
+  }
+
+  close(cx) {
+    if (this.dirty && !this.confirming) { this.confirming = true; cx.notify(); return; }
+    this.code?.release();
+    closeOverlay(this.p.overlay);
+  }
+
+  // 确认盒：不保存 = 直接丢弃退出；底下垫静态预览，文档不至于凭空消失。
+  confirmView(t) {
+    const cancel = (_e, cx) => { this.confirming = false; cx.notify(); };
+    return div().absolute().inset_0().flex().items_center().justify_center()
+      .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); cancel(_e, cx); })
+      .child(v_flex().w(320).p(18).gap(10).rounded(12).bg(t.background).border_1().border_color(t.border)
+        .child(div().text_size(13).font_semibold().text_color(t.foreground).child("未保存的修改"))
+        .child(div().text_size(12).text_color(t.muted).child(`${this.p.path?.split("/").pop() ?? "This file"} has unsaved changes.`))
+        .child(h_flex().justify_end().gap(8).flex_none()
+          .child(h_flex().id("fv-quit-no").h(30).px(12).items_center().rounded(8).border_1().border_color(t.border)
+            .text_size(12).text_color(t.foreground).cursor_pointer()
+            .hover(s => s.bg(t.hover))
+            .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+            .on_click(() => { this.code?.release(); closeOverlay(this.p.overlay); }).child("不保存"))
+          .child(h_flex().id("fv-quit-yes").h(30).px(12).items_center().rounded(8).bg(t.solid)
+            .text_size(12).text_color(t.solid_foreground).cursor_pointer()
+            .hover(s => s.bg(t.hover))
+            .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+            .on_click((_e, cx) => { this.confirming = false; this.save(cx, true); }).child("保存"))));
+  }
+
+  // 确认期间垫底的静态预览：纯 div，能被确认盒盖住。
+  // 确认期间垫底的静态预览：只取前 2 万字符，长文件不把几千行都铺出来。
+  previewView(t) {
+    const text = this.code ? this.code.value() : "";
+    const cut = text.length > 20000;
+    const lines = (cut ? text.slice(0, 20000) : text).split("\n");
+    if (cut && lines.length > 1) lines.pop();
+    return div().flex_1().min_h(0).overflow_y_scrollbar().px(18).py(10).opacity(0.45)
+      .child(v_flex().gap(1).w_full().children([
+        ...lines.map(line => div().w_full().text_size(12).text_color(t.muted).child(line || " ")),
+        ...(cut ? [div().w_full().text_size(12).text_color(t.dim).child("…")] : []),
+      ]));
+  }
+
   render(cx) {
     const t = theme();
     const name = this.p.path?.split("/").pop() ?? "File";
     const font = this.code ? settings() : null;
-    return v_flex().size_full().min_h(0).bg(t.background).text_color(t.foreground)
+    return v_flex().size_full().min_h(0).relative().bg(t.background).text_color(t.foreground)
+      .on_key_down((e, cx) => {
+        if ((e.modifiers.platform || e.modifiers.control) && e.key === "s") {
+          if (this.confirming) { this.confirming = false; this.save(cx, true); }
+          else this.save(cx);
+          cx.stop_propagation();
+          return;
+        }
+        if (e.key === "escape") {
+          if (this.confirming) { this.confirming = false; cx.notify(); }
+          else this.close(cx);
+          cx.stop_propagation();
+        }
+      })
       .child(
         h_flex().h(40).flex_none().px(12).gap(8).items_center().border_b(1).border_color(t.border)
-          .child(div().font_semibold().child(name))
+          .child(div().text_size(13).font_semibold().child(name))
           .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(this.p.path ?? ""))
-          .child(div().id("viewer-close").px(6).py(2).rounded(6).cursor_pointer().text_color(t.muted)
-            .hover(el => el.bg(t.hover).text_color(t.foreground))
-            .on_click(() => closeOverlay(this.p.overlay)).child("✕")),
+          .when(this.dirty, el => el.child(div().size(7).rounded_full().bg(t.ansi1)))
+          .child(h_flex().id("viewer-close").size(24).items_center().justify_center().rounded(6).cursor_pointer().text_color(t.dim)
+            .hover(el => el.bg(t.raised).text_color(t.foreground))
+            .on_click((_e, cx) => this.close(cx)).child("×")),
       )
       .child(
-        this.code
+        this.code && !this.confirming
           ? Editor.new(this.code).font_family(font.font_family).text_size(font.font_size).flex_1().min_h(0)
-          : div().p(12).text_color(t.dim).child(this.error || "Loading file…"),
-      );
+          : this.confirming
+            ? this.previewView(t)
+            : div().flex_1().p(12).text_color(t.dim).child(this.error || "Loading file…"),
+      )
+      .when(Boolean(this.confirming), el => el.child(this.confirmView(t)));
   }
 }
 

@@ -687,6 +687,12 @@ export default class AbsPanel extends View {
         if (cmd === "open-zed") this.openIn("zed");
         else if (cmd === "open-code") this.openIn("code");
         else if (cmd.startsWith("rule-add:")) this.addRuleText(cmd.slice("rule-add:".length));
+        else if (cmd.startsWith("rule-edit:")) {
+          // 形如 rule-edit:<行号>:<新文本>，文本里可能带冒号，只在第一个冒号处切开。
+          const rest = cmd.slice("rule-edit:".length);
+          const at = rest.indexOf(":");
+          if (at > 0) this.editRuleText(Number(rest.slice(0, at)), rest.slice(at + 1));
+        }
         cx.notify();
       }
     });
@@ -1130,26 +1136,45 @@ export default class AbsPanel extends View {
         this.toggleLog(item.id, this.lastCx);
         return;
       }
-      // 跟行格式同一个顺序：时间 → 作者 → 标签 → 会话 id → 状态/结论。
-      const meta = [item.date, item.who, ...(item.tags ?? []), item.id, item.state, item.verdict].filter(Boolean);
-      // 详情正文：先父任务那一行原文，再跟着子项（按文件里的缩进和勾选字符写回去）。
-      const body = [
-        item.line ?? "",
-        ...(item.children ?? []).map((k) => `  - [${k.mark || (k.done ? "x" : " ")}] ${k.text}`),
-      ];
+      // 和看板行同款格式：状态点、结论、日期、标签、描述、子项。不再丢原文件行。
+      const dotColor = item.verdict === "落地" ? TINT.green
+        : item.verdict === "否决" ? TINT.red
+        : item.verdict === "仅方案" ? TINT.gold
+        : this.stateColor(t, item);
       openOverlay({
         mod: "abs-detail", kind: "dialog", width: 620, height: 460,
-        props: { title: item.title, meta, body },
+        props: {
+          title: item.title,
+          view: "task",
+          dotColor,
+          dotSolid: item.verdict != null,
+          state: item.state,
+          verdict: item.verdict,
+          when: dateShort(item.date),
+          who: item.who,
+          tags: item.tags ?? [],
+          id: item.id,
+          note: (item.note ?? "").replace(/\s+/g, " ").trim(),
+          kids: (item.children ?? []).map((k) => ({ text: k.text, done: k.done, color: kidColor(t, k) })),
+        },
       });
       return;
     }
     if (kind === "page") { this.openPage(item); return; }
+    // 日志条目：和日志行同款——金点、标题、日期、作者·类型·标签，下面正文。
     openOverlay({
       mod: "abs-detail", kind: "dialog", width: 640, height: 420,
       props: {
         title: item.title || item.text.split("\n")[0] || "(空)",
-        meta: [item.when, item.who, ...(item.tags ?? []), item.id, item.kind].filter(Boolean),
-        body: [item.line ?? ""],
+        view: "log",
+        dotColor: TINT.gold,
+        dotSolid: true,
+        when: dateShort(item.when),
+        who: item.who,
+        kind: item.kind,
+        tags: item.tags ?? [],
+        id: item.id,
+        body: String(item.text || item.line || "").split("\n"),
       },
     });
   }
@@ -1159,16 +1184,16 @@ export default class AbsPanel extends View {
     const base = this.brainDir;
     const on = this.brainOn;
     const file = base ? await this.pagePath(base, on, item.name, item.section) : null;
-    const text = file ? await readTextFile(file, { on }).catch(() => null) : null;
+    if (!file) {
+      openOverlay({
+        mod: "abs-detail", kind: "dialog", width: 560, height: 160,
+        props: { title: item.name, meta: [item.section].filter(Boolean), body: [`没找到这份文档：${base ?? ".brain"} 下没有 ${item.name}.md`] },
+      });
+      return;
+    }
     openOverlay({
-      mod: "abs-detail", kind: "dialog", width: 680, height: 560,
-      props: {
-        title: item.name,
-        meta: [item.section].filter(Boolean),
-        body: text != null
-          ? text.split("\n")
-          : [`读不到这份文档：${file ?? `${base ?? ".brain"} 下没找到 ${item.name}.md`}`],
-      },
+      mod: "abs-detail", kind: "dialog", modal: true, width: 780, height: 640,
+      props: { page: true, path: file, on, section: item.section, title: item.name },
     });
   }
 
@@ -1398,7 +1423,7 @@ export default class AbsPanel extends View {
     // 没有铁律段也照样显示这张卡，只是上面写「还没有铁律」。
     const rules = this.index.rules ?? [];
     // writeTextFile 只能写本机，远程的 index.md 改不了。
-    const editable = !this.brainOn && Boolean(this.brainDir);
+    const editable = Boolean(this.brainDir);
     // 默认只摆前 3 条，多的收起来；点「全部」展开。删行按原编号，展开不展开都对。
     const LIMIT = 3;
     const expanded = this.rulesOpen === true;
@@ -1408,12 +1433,14 @@ export default class AbsPanel extends View {
       "Rules",
       `${rules.length}`,
       [
-        ...(shown.length ? shown.map((text, i) => h_flex().w_full().flex_none().gap(7).items_center().px(7).py(5).rounded(8)
+        ...(shown.length ? shown.map((text, i) => h_flex().id(`abs-rule-${i}`).w_full().flex_none().gap(7).items_center().px(7).py(5).rounded(8)
           .hover((el) => el.bg(t.chrome))
+          .when(editable, (e) => e.cursor_pointer().on_click(() => this.editRule(i)))
           .child(div().text_size(FS_META).flex_none().w(12).text_color(t.dim).child(`${i + 1}`))
           .child(div().flex_1().min_w(0).truncate().text_size(FS_BODY).text_color(t.foreground).child(text))
           .when(editable, (e) => e.child(div().id(`abs-rule-del-${i}`).size(18).flex_none().flex().items_center().justify_center()
             .rounded(5).text_size(FS_BODY).text_color(t.dim).cursor_pointer()
+            .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
             .hover((s) => s.bg(t.hover).text_color(t.ansi1))
             .on_click(() => this.removeRule(i)).child("×")))) : [div().px(6).text_size(FS_BODY).text_color(t.dim).child("还没有铁律")]),
         ...(hidden > 0 ? [h_flex().id("abs-rule-more").h(22).px(6).flex_none().items_center().text_size(FS_META).text_color(t.dim)
@@ -1427,7 +1454,7 @@ export default class AbsPanel extends View {
             .text_size(FS_BODY).text_color(t.dim).cursor_pointer()
             .hover((s) => s.bg(t.chrome).text_color(t.foreground))
             .on_click(() => this.addRule()).child("+ 添加铁律")
-          : div().px(6).text_size(FS_META).text_color(t.dim).child(this.brainOn ? `${this.brainOn} 上的文件改不了，只能看` : "没找到 index.md"),
+          : div().px(6).text_size(FS_META).text_color(t.dim).child(this.brainOn ? `${this.brainOn} · 远程可直接改` : "没找到 index.md"),
       ],
       0,
       null,
@@ -1437,15 +1464,25 @@ export default class AbsPanel extends View {
 
   // 改 index.md 的 Rules 段：先整份读下来，换掉这一段，再整份写回。
   async editRules(change) {
-    if (this.brainOn || !this.brainDir) return;
+    if (!this.brainDir) return;
     const path = `${this.brainDir}/index.md`;
     try {
-      const text = await readTextFile(path).catch(() => null);
+      const text = await readTextFile(path, { on: this.brainOn }).catch(() => null);
       if (text == null) { this.note = "读不到 index.md"; this.noteKind = "open"; return; }
       const next = change(text);
       if (next === text) return;
-      // expected 传原文：这期间文件被別处改了，写入会被拒绝，不会覆盖别人的改动。
-      await writeTextFile(path, next, text);
+      if (this.brainOn) {
+        // 远程：先重读确认没被别人改过，再走 sh + heredoc 写回（writeTextFile 只管本机）。
+        const cur = await readTextFile(path, { on: this.brainOn });
+        if (cur !== text) throw new Error("文件在远程已被别人改过，保存拒绝");
+        // 先写同目录临时文件再 mv：中途断连不会留下半截 index.md（mv 同盘是原子的）。
+        const d = "ABS_EOF_" + Math.random().toString(36).slice(2, 10);
+        const r = await exec("sh", ["-c", `t="$1.tmp.$$"; cat > "$t" <<'${d}'\n${next}\n${d}\nrc=$?; if [ "$rc" -eq 0 ]; then mv -f "$t" "$1"; else rm -f "$t"; fi; exit $rc`, "abs-rules", path], { on: this.brainOn });
+        if (!r || r.code !== 0) throw new Error((r?.stderr || "写入失败").trim().slice(0, 120) || "写入失败");
+      } else {
+        // expected 传原文：这期间文件被別处改了，写入会被拒绝，不会覆盖别人的改动。
+        await writeTextFile(path, next, text);
+      }
       this.note = null;
       this.noteKind = null;
       this.refresh(this.lastCx);
@@ -1457,13 +1494,29 @@ export default class AbsPanel extends View {
 
   addRule() {
     openOverlay({
-      mod: "abs-detail", kind: "dialog", width: 520, height: 240,
+      mod: "abs-detail", kind: "dialog", width: 480, height: 190,
       props: {
         title: "添加铁律",
         meta: ["写入 index.md 的 ## Rules"],
         input: { placeholder: "一句话说清这条规矩" },
         submitLabel: "添加",
         submit: { name: "abs-panel.rule-add" },
+      },
+    });
+  }
+
+  // 点一条铁律：同一个弹窗，输入框里预先填好原文，保存时按行号替换。
+  editRule(i) {
+    const text = (this.index.rules ?? [])[i];
+    if (text == null) return;
+    openOverlay({
+      mod: "abs-detail", kind: "dialog", width: 480, height: 190,
+      props: {
+        title: "编辑铁律",
+        meta: [`第 ${i + 1} 条`, "改完写回 index.md 的 ## Rules"],
+        input: { placeholder: "一句话说清这条规矩", value: text },
+        submitLabel: "保存",
+        submit: { name: `abs-panel.rule-edit:${i}` },
       },
     });
   }
@@ -1476,6 +1529,13 @@ export default class AbsPanel extends View {
     const line = String(rule ?? "").trim();
     if (!line) return;
     this.editRules((text) => rebuildRules(text, (cur) => (cur.includes(line) ? cur : [...cur, line])));
+  }
+
+  // 编辑第 i 条：换成新文本；改空了等于删掉那条。
+  editRuleText(i, value) {
+    const line = String(value ?? "").trim();
+    this.editRules((text) => rebuildRules(text, (cur) =>
+      line ? cur.map((r, j) => (j === i ? line : r)) : cur.filter((_, j) => j !== i)));
   }
 
   // 日志：左边一根竖线当时间轴，最新那条是实心节点，其余是空心环。
