@@ -747,9 +747,9 @@ class ChangesPanel extends View {
           this.dragH = histH;
           cx.notify();
         }))
-      .child(h_flex().h(34).flex_none().w_full().pl(10).pr(8).gap(6).items_center().border_b(1).border_color(t.border)
+      .child(h_flex().h(36).flex_none().w_full().px(12).gap(6).items_center().border_b(1).border_color(t.border)
         .child(ICONS("history", t.muted, 14))
-        .child(div().flex_none().text_size(12.5).font_semibold().text_color(t.foreground).child("Git"))
+        .child(div().flex_none().text_size(13).font_semibold().text_color(t.foreground).child("Git"))
         .child(div().flex_1().min_w(4))
         .child(pill("repo-picker", repo?.name ?? "无仓库", this.picker === "repo", (cx) => { this.picker = this.picker === "repo" ? null : "repo"; cx.notify(); }))
         .child(pill("branch-picker", repo?.branch || "—", this.picker === "branch", (cx) => { this.picker = this.picker === "branch" ? null : "branch"; cx.notify(); }, false)))
@@ -763,8 +763,8 @@ class ChangesPanel extends View {
         if (e.key === "escape" && this.typing) { this.typing = false; this.handle.focus(); cx.stop_propagation(); cx.notify(); }
       })
       // 头部：标题 + 仓库名（可截断）+ 增删 + 刷新
-      .child(h_flex().h(34).flex_none().w_full().pl(10).pr(8).gap(4).items_center().border_b(1).border_color(t.border)
-        .child(div().flex_none().text_size(12.5).font_semibold().child("Changes"))
+      .child(h_flex().h(36).flex_none().w_full().px(12).gap(6).items_center().border_b(1).border_color(t.border)
+        .child(div().flex_none().text_size(13).font_semibold().child("Changes"))
         .when(Boolean(tracking), (e) => e.child(div().flex_none().text_size(11).text_color("#8fb1ec").child(tracking)))
         .child(div().flex_1().min_w(4))
         .child(iconButton("pull", t, { name: "arrow-down", ghost: true, on: Boolean(repo) && !this.busy, tip: "拉取", fn: (cx) => this.pull(cx) }))

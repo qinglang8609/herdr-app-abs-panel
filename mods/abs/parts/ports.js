@@ -750,8 +750,8 @@ export default class Ports extends View {
     // 本机项目：空态卡片（正常不会进来，按钮已隐藏，只是兜底）。
     if (!server) {
       return v_flex().id("abs-ports").w_full().rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border)
-        .child(h_flex().h(32).flex_none().px(9).items_center().border_b(1).border_color(t.border)
-          .child(div().text_size(12.5).font_semibold().text_color(t.foreground).child("端口转发")))
+        .child(h_flex().h(36).flex_none().px(12).items_center().border_b(1).border_color(t.border)
+          .child(div().text_size(13).font_semibold().text_color(t.foreground).child("端口转发")))
         .child(div().px(9).py(12).text_size(11.5).text_color(t.dim).child("当前是本机项目，没有远程端口转发。切到远程项目后可管理。"));
     }
 
@@ -766,8 +766,8 @@ export default class Ports extends View {
 
     return v_flex().id("abs-ports").w_full().rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border)
       .flex_grow(1).flex_basis(0).min_h(0)
-      .child(h_flex().h(32).flex_none().px(9).gap(6).items_center().border_b(1).border_color(t.border)
-        .child(div().text_size(12.5).font_semibold().text_color(t.foreground).child("端口转发"))
+      .child(h_flex().h(36).flex_none().px(12).gap(6).items_center().border_b(1).border_color(t.border)
+        .child(div().text_size(13).font_semibold().text_color(t.foreground).child("端口转发"))
         .child(div().px(5).rounded(4).bg(t.chrome).text_size(10).text_color(t.muted).child(server.machine))
         .when(this.items.length > 0, (e) => e.child(div().px(5).rounded(4).bg(t.chrome).text_size(10).text_color(t.muted).child(`${this.items.length} 条`)))
         .child(div().flex_1())
