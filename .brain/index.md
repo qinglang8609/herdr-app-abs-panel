@@ -12,3 +12,7 @@
 ## Sources
 
 ## Syntheses
+
+## Anchors
+<!-- 跨页关键词（一个词出现在 ≥2 个页面里）。由 abs init --repair 重建，别手写。 -->
+（暂无跨页 anchors）

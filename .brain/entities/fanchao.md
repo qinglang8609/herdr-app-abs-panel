@@ -4,6 +4,8 @@ id: fanchao
 author: fanchao
 updated: 2026-11-09
 status: draft
+layer: 4
+anchors: [todo, log]
 ---
 
 # fanchao
