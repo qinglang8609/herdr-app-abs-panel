@@ -1186,7 +1186,7 @@ export default class AbsPanel extends View {
     const file = base ? await this.pagePath(base, on, item.name, item.section) : null;
     if (!file) {
       openOverlay({
-        mod: "abs-detail", kind: "dialog", width: 560, height: 160,
+        mod: "abs-detail", kind: "dialog", modal: true, width: 440,
         props: { title: item.name, meta: [item.section].filter(Boolean), body: [`没找到这份文档：${base ?? ".brain"} 下没有 ${item.name}.md`] },
       });
       return;
@@ -1494,7 +1494,7 @@ export default class AbsPanel extends View {
 
   addRule() {
     openOverlay({
-      mod: "abs-detail", kind: "dialog", width: 480, height: 190,
+      mod: "abs-detail", kind: "dialog", modal: true, width: 400,
       props: {
         title: "添加铁律",
         meta: ["写入 index.md 的 ## Rules"],
@@ -1510,7 +1510,7 @@ export default class AbsPanel extends View {
     const text = (this.index.rules ?? [])[i];
     if (text == null) return;
     openOverlay({
-      mod: "abs-detail", kind: "dialog", width: 480, height: 190,
+      mod: "abs-detail", kind: "dialog", modal: true, width: 400,
       props: {
         title: "编辑铁律",
         meta: [`第 ${i + 1} 条`, "改完写回 index.md 的 ## Rules"],

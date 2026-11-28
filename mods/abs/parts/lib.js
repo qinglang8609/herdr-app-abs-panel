@@ -2,8 +2,9 @@
 // the shown thread (= Herdr tab) and its lead terminal, layout lookups,
 // and the light/dark switch.
 
-import { svg, image } from "gpui-kit";
-import { spaces, panes, agents, focused, layout, appHome, readTextFile, writeTextFile, exec, notify, setShared, window as win } from "herdr";
+import { svg, image, div } from "gpui-kit";
+import { h_flex, v_flex } from "gpui-base";
+import { spaces, panes, agents, focused, layout, appHome, readTextFile, writeTextFile, exec, notify, setShared, theme, window as win } from "herdr";
 
 export const MOD = "abs";
 export const icon = (name) => `mods/${MOD}/icons/${name}.svg`;
@@ -240,4 +241,57 @@ export async function installThemes() {
     const text = await readTextFile(`${appHome()}/mods/${MOD}/themes/${name}.json`).catch(() => null);
     if (text) await writeTextFile(target, text, null).catch(() => null);
   }
+}
+
+// ---- 弹窗零件：abs 模块内所有表单 / 浮层一个样（abs-detail 那边有一份同样的，
+// detail 是独立 mod 不能跨目录 import，两边各带，改一处要改两处）。
+//
+//   输入框 / 下拉  高 30 圆角 7 px 10，透明底 + border 边框；聚焦 accent 边框
+//   字段          标签 11 dim 离输入框 5；字段之间 gap 12
+//   按钮          高 28 圆角 7：取消 px 12 描边 input；主按钮 px 14 实心 solid（危险 ansi1）
+//   按钮行        靠右 gap 8，距内容 10
+//   关闭 ×        20×20 圆角 5，dim；悬停 raised 底 + foreground
+// 实心按钮悬停只变淡不换底色——bg(t.hover) 是深底色，盖上去像换了按钮。
+export function btnCancel(id, label, onClick) {
+  const t = theme();
+  return h_flex().id(id).h(28).px(12).items_center().rounded(7).border_1().border_color(t.input)
+    .text_size(12).text_color(t.foreground).cursor_pointer()
+    .hover((s) => s.border_color(t.muted))
+    .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+    .on_click(onClick).child(label);
+}
+export function btnPrimary(id, label, on, onClick, danger = false) {
+  const t = theme();
+  return h_flex().id(id).h(28).px(14).items_center().rounded(7).text_size(12)
+    .bg(on ? (danger ? t.ansi1 : t.solid) : t.raised)
+    .text_color(on ? t.solid_foreground : t.dim)
+    .when(on, (x) => x.cursor_pointer().hover((s) => s.opacity(0.82)))
+    .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+    .on_click((_e, cx) => { if (on) onClick(cx); })
+    .child(label);
+}
+export function btnClose(id, onClick) {
+  const t = theme();
+  return h_flex().id(id).size(20).flex_none().items_center().justify_center().rounded(5)
+    .text_size(14).text_color(t.dim).cursor_pointer()
+    .hover((s) => s.bg(t.raised).text_color(t.foreground))
+    .on_click(onClick).child("×");
+}
+// 输入框 / 下拉共用的壳。onClick 有值就是可点的下拉。
+export function inputShell(t, { typing = false, onClick = null } = {}, ...children) {
+  const el = h_flex().h(30).w_full().px(10).items_center().rounded(7).border_1()
+    .border_color(typing ? t.accent : t.border)
+    .on_mouse_down("left", (_e, cx) => cx.stop_propagation());
+  if (onClick) el.cursor_pointer().on_click(onClick);
+  return el.children(children);
+}
+// 字段：标签 + 壳。
+export function field(t, label, shell) {
+  return v_flex().w_full().gap(5)
+    .child(div().text_size(11).text_color(t.dim).child(label))
+    .child(shell);
+}
+// 底部按钮行：靠右、gap 8、距内容 10。
+export function footer(...btns) {
+  return h_flex().w_full().flex_none().justify_end().gap(8).mt(2).children(btns.filter(Boolean));
 }

@@ -2,7 +2,32 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
 import { FOR_EXT, FOR_NAME, FOR_DIR, FILE, FOLDER, FOLDER_OPEN } from "./icons-map.js";
-import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, props, openOverlay, closeOverlay, notify } from "herdr";
+import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, props, openOverlay, closeOverlay, notify, nextCommand, setShared } from "herdr";
+
+// 用 VS Code / Zed / 系统文件窗口打开一个目录。远程机器要查 ssh 别名（空间的
+// machine 是显示名，用户改过大小写就可能和 ssh Host 对不上）。和 abs/parts/lib.js
+// 同一份逻辑，mod 之间不跨目录 import，各自带。
+function openInEditor(app, dir, on) {
+  if (!dir) return;
+  const platform = window()?.platform;
+  const list = platform === "macos"
+    ? [["vscode", "VS Code", "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"], ["zed", "Zed", "/Applications/Zed.app/Contents/MacOS/cli"], ["files", "文件窗口", "open"]]
+    : platform === "windows"
+      ? [["vscode", "VS Code", "code"], ["zed", "Zed", "zed"], ["files", "文件窗口", "explorer.exe"]]
+      : [["vscode", "VS Code", "code"], ["zed", "Zed", "zed"], ["files", "文件窗口", "xdg-open"]];
+  const e = list.find((x) => x[0] === app) ?? list[0];
+  if (app !== "files") setShared("studio.editor", e[0]);
+  const fail = (err) => notify({ title: `打不开 ${e[1]}${on ? `（${on}）` : ""}`, body: String(err && (err.stderr || err.message || err)).split("\n")[0] || "没装？", level: "error" });
+  if (e[0] === "files") { exec(e[2], [dir], on ? { on } : undefined).catch(fail); return; }
+  if (!on) { exec(e[2], [dir]).catch(fail); return; }
+  // 查 ssh Host 的 awk：k 是机器名，大小写不敏感
+  const k = String(on).replace(/'/g, "");
+  const host = `$(awk -v k='${k}' 'tolower($1)=="host"{for(i=2;i<=NF;i++) if(tolower($i)==k){print $i; exit}}' "$HOME/.ssh/config" 2>/dev/null)`;
+  const script = e[0] === "zed"
+    ? `exec "${e[2]}" "ssh://\${host:-${on}}'${dir}'"`
+    : `exec "${e[2]}" --remote "ssh-remote+\${host:-${on}}" '${dir}'`;
+  exec("sh", ["-c", script]).catch(fail);
+}
 
 // 远程写文件：writeTextFile 只管本机；远程走 sh + heredoc（base64 在部分机器上被拒）。
 async function shellWrite(path, text, on) {
@@ -112,6 +137,18 @@ class Browser extends View {
     this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
     this.refresh(cx);
     cx.timer.every(500, cx => this.refreshIfDue(cx));
+    // 弹窗回传：files-mine.<op>:<json>。整段 JSON 走 JSON.parse，名字里带冒号空格都不怕。
+    cx.spawn(async (cx) => {
+      for (;;) {
+        const cmd = await nextCommand();
+        const at = cmd.indexOf(":");
+        const op = at > 0 ? cmd.slice(0, at).replace(/^files-mine\./, "") : cmd.replace(/^files-mine\./, "");
+        let args = {};
+        try { args = at > 0 ? JSON.parse(cmd.slice(at + 1)) : {}; } catch { /* 没参数 */ }
+        if (await this.onMenu(op, args, cx) === "refresh") this.refresh(cx);
+        cx.notify();
+      }
+    });
   }
 
   refreshIfDue(cx) {
@@ -254,10 +291,136 @@ class Browser extends View {
     cx.notify();
   }
 
+  // ---- 右键菜单 + 文件操作 ----------------------------------------------
+  // 弹窗（abs-detail 的 menu 视图）点一项就 run("files-mine.<op>:<json>") 回到这里，
+  // 和铁律弹窗同一条通道；路径带空格 / 冒号也没事，整段是 JSON。
+  // 右键：空白处 / 文件夹 / 文件，三种菜单。
+  //   空白处：新建文件、新建文件夹、三个「打开」
+  //   文件夹：新建文件、新建文件夹、重命名、删除、复制
+  //   文件：  重命名、删除、复制
+  // 菜单项的 args 里带 path（文件夹上新建要建在那个文件夹里）。
+  contextMenu(path, dir) {
+    const full = path ? `${this.root}/${path}` : this.root;
+    const base = (label, op, args) => [label, `files-mine.${op}`, args];
+    const items = [
+      ...(!path || dir ? [
+        base("新建文件", "new.file", { dir: full }),
+        base("新建文件夹", "new.dir", { dir: full }),
+      ] : []),
+      ...(!path ? [
+        base("在 VS Code 中打开", "editor", { app: "vscode", path: full }),
+        base("在 Zed 中打开", "editor", { app: "zed", path: full }),
+        base("在文件窗口中打开", "editor", { app: "files", path: full }),
+      ] : []),
+      ...(path ? [
+        base("重命名", "rename", { path: full, name: path.split("/").pop() }),
+        base("删除", "delete", { path: full, name: path.split("/").pop(), dir }),
+        base("复制路径", "copy", { text: full }),
+        base("复制相对路径", "copy", { text: path }),
+      ] : []),
+    ];
+    openOverlay({ mod: "abs-detail", kind: "popup", width: 210, props: { view: "menu", items } });
+  }
+
+  // 需要输入 / 确认的操作先开弹窗，确认后带着 value 再发第二条同名命令才真正执行。
+  askForm(op, args) {
+    // 高度不传：弹窗按内容撑，不写死。
+    const dialog = (props, w) => openOverlay({ mod: "abs-detail", kind: "dialog", modal: true, width: w, props });
+    if (op === "new.file" || op === "new.dir") {
+      dialog({
+        title: op === "new.dir" ? "新建文件夹" : "新建文件",
+        input: { placeholder: "名字", value: "" },
+        submitLabel: "创建",
+        submit: { name: `files-mine.${op}`, args: { dir: args.dir } },
+      }, 400);
+      return true;
+    }
+    if (op === "rename") {
+      dialog({
+        title: "重命名",
+        input: { placeholder: "新名字", value: args.name ?? "" },
+        submitLabel: "重命名",
+        submit: { name: "files-mine.rename", args: { path: args.path } },
+      }, 400);
+      return true;
+    }
+    if (op === "delete") {
+      dialog({
+        view: "confirm",
+        title: "删除",
+        message: `确定删除${args.dir ? "文件夹" : "文件"}「${args.name}」？这一步不能撤销。`,
+        submitLabel: "删除",
+        submit: { name: "files-mine.delete", args: { path: args.path, confirmed: true } },
+      }, 400);
+      return true;
+    }
+    return false;
+  }
+
+  // 弹窗回传：files-mine.<op>:<json>。返回 "refresh" 让监听方重扫。
+  // 所有路径参数都过 inRoot()：必须在 root 之下、且不等于 root —— JSON 是回传链路
+  // 拼出来的，出岔子时空串或 root 本身绝不能流到 rm/mv 手里。
+  async onMenu(op, args, cx) {
+    const on = this.on, root = this.root;
+    const sh = (script, ...argv) => exec("sh", ["-c", script, "fm", ...argv], { on });
+    const inRoot = (p) => typeof p === "string" && p.startsWith(root + "/") && p.length > root.length + 1;
+    const bad = (what, r) => notify({ title: `${what}失败`, body: String(r?.stderr || r?.stdout || r || "").trim().split("\n")[0].slice(0, 90), level: "error", timeout: 3500 });
+    const noName = () => notify({ title: "名字不合法", level: "error", timeout: 2500 });
+    if (op === "copy") { if (typeof args.text !== "string") return null; cx.write_to_clipboard(args.text); notify({ title: "已复制", body: args.text.split("/").pop(), level: "info", timeout: 1200 }); return null; }
+    if (op === "editor") { openInEditor(args.app, args.path, on); return null; }
+    // 新建 / 重命名 / 删除：菜单点过来时没有 value，先开弹窗；弹窗回传才带 value。
+    if (args.value == null && !args.confirmed && ["new.file", "new.dir", "rename", "delete"].includes(op)) {
+      this.askForm(op, args);
+      return null;
+    }
+    if (op === "new.file" || op === "new.dir") {
+      const name = String(args.value ?? "").trim();
+      if (!name || name.includes("/") || name === "." || name === "..") return noName();
+      // 文件夹里建：那个目录得在 root 下；空白处建 dir === root。
+      if (args.dir !== root && !inRoot(args.dir)) return noName();
+      const target = `${args.dir}/${name}`;
+      // 新建文件不能把已有的清空：先 test 不存在再创建（noclobber 同义，报错更清楚）。
+      const script = op === "new.dir"
+        ? 'mkdir -p -- "$1"'
+        : '[ -e "$1" ] && { echo "已存在同名" >&2; exit 1; }; : > "$1"';
+      const r = await sh(script, target);
+      if (r?.code !== 0) { bad("新建", r); return null; }
+      if (args.dir !== root) this.folders.add(args.dir.slice(root.length + 1));
+      return "refresh";
+    }
+    if (op === "rename") {
+      const name = String(args.value ?? "").trim();
+      if (!name || name.includes("/") || name === "." || name === "..") return noName();
+      if (!inRoot(args.path)) return noName();
+      const to = `${args.path.slice(0, args.path.lastIndexOf("/"))}/${name}`;
+      if (to === args.path) return null;
+      // 目标已存在就不覆盖；报出来而不是静默不动
+      const r = await sh('[ -e "$2" ] && { echo "已存在同名" >&2; exit 1; }; mv -n -- "$1" "$2"', args.path, to);
+      if (r?.code !== 0) { bad("重命名", r); return null; }
+      // 展开状态跟着改名走：a/b → a/c，a/b/x → a/c/x
+      const from = args.path.slice(root.length + 1), toRel = to.slice(root.length + 1);
+      this.folders = new Set([...this.folders].map((f) => (f === from || f.startsWith(from + "/") ? toRel + f.slice(from.length) : f)));
+      return "refresh";
+    }
+    if (op === "delete") {
+      if (!inRoot(args.path)) return noName();
+      const r = await sh('rm -rf -- "$1"', args.path);
+      if (r?.code !== 0) { bad("删除", r); return null; }
+      // 展开状态清掉；正在看着这个文件（或这个文件夹里的东西）的弹窗也关掉。
+      const rel = args.path.slice(root.length + 1);
+      this.folders = new Set([...this.folders].filter((f) => !(f === rel || f.startsWith(rel + "/"))));
+      // 正在看这个文件 / 这个文件夹里的东西的弹窗，关掉。
+      for (const [w, id] of this.viewers ?? []) if (w === args.path || w.startsWith(args.path + "/")) { closeOverlay(id); this.viewers.delete(w); }
+      return "refresh";
+    }
+    return null;
+  }
+
+  // 点文件不挤进这个面板：弹一个浮窗，本机远程都可编辑保存。
   // 点文件不挤进这个面板：弹一个浮窗，本机远程都可编辑保存。
   openViewer(path) {
     if (!this.root) return;
-    openOverlay({
+    const id = openOverlay({
       mod: "files-mine",
       kind: "dialog",
       modal: true,
@@ -265,6 +428,9 @@ class Browser extends View {
       height: 0.82,
       props: { part: "viewer", path, root: this.root, on: this.on },
     });
+    // 记着开着的弹窗：删除文件时能把它关掉，不让窗指着一个不存在的文件。
+    this.viewers ??= new Map();
+    this.viewers.set(`${this.root}/${path}`, id);
   }
 
   show(path, cx) {
@@ -293,6 +459,7 @@ class Browser extends View {
       const path = prefix ? `${prefix}/${entry.name}` : entry.name, open = this.folders.has(path), mark = this.marks[`${this.root}/${path}`];
       out.push(h_flex().id(`file-${path}`).h(28).flex_none().pl(8 + depth * 18).pr(8).gap(7).items_center().rounded(7).cursor_pointer().hover(s => s.bg(t.hover))
         .on_click((_e, cx) => entry.dir ? this.toggle(path, cx) : this.openViewer(path))
+        .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.contextMenu(path, entry.dir); })
         // 文件夹的展开/折叠已经体现在图标上（folder-open / folder），前面不再放箭头。
         .child(image(`mods/files-mine/icons/${iconFor(entry.name, entry.dir, open)}`).w(15).h(15).flex_none())
         .child(div().flex_1().min_w(0).truncate().child(entry.name))
@@ -303,6 +470,7 @@ class Browser extends View {
   }
 
   render(cx) {
+    this.lastCx = cx;
     if (key() !== this.context?.key) this.refresh(cx);
     else this.refreshIfDue(cx);
     const t = theme();
@@ -312,7 +480,9 @@ class Browser extends View {
         .when(Boolean(this.file), el => el.child(div().id("files-back").w(20).cursor_pointer().text_color(t.muted).on_click((_e, cx) => { this.show(null); cx.notify(); }).child("←")))
         .child(div().font_semibold().child("Files"))
         .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.file ?? this.root?.split(/[\\/]/).pop() ?? "")))
-      .when(!this.file, el => el.child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
+      .when(!this.file, el => el.child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6)
+        .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.contextMenu(null, true); })
+        .children(this.rows("", 0, [], t))
         .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
         .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total")))))
       .when(Boolean(this.file), el => el.child(this.code

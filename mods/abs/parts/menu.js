@@ -53,8 +53,8 @@ function items(p, git) {
       return [
         ["Change icon", "space.icon", { id: tg.id }],
         ["Rename", "space.rename", { id: tg.id }],
-        ["Open in VS Code", "open.editor", { app: "vscode", dir, on: sp?.machine }],
-        ["Open in Zed", "open.editor", { app: "zed", dir, on: sp?.machine }],
+        ["VS Code", "open.editor", { app: "vscode", dir, on: sp?.machine }],
+        ["Zed", "open.editor", { app: "zed", dir, on: sp?.machine }],
         ...(!sp?.machine && dir ? [["文件窗口", "open.finder", { dir }]] : []),
         ...(git ? [["New worktree", "worktree", { space: tg.id, action: "new" }], ["Open worktree", "worktree", { space: tg.id, action: "open" }]] : []),
         ...(git === "worktree" ? [["Remove worktree", "worktree", { space: tg.id, action: "remove" }]] : []),

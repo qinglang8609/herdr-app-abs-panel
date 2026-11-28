@@ -18,7 +18,7 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { run, theme, exec, hc, home, appHome, readTextFile, writeTextFile, notify, terminals, machines } from "herdr";
-import { icon, activeSpace } from "./lib.js";
+import { icon, activeSpace, btnCancel, btnPrimary, inputShell, field, footer } from "./lib.js";
 
 const RECORD = () => `${appHome()}/abs-ports.json`;
 const SSH_CONFIG = () => `${home()}/.ssh/config`;
@@ -293,6 +293,12 @@ export default class Ports extends View {
     this.inputLocal = InputState.new({ placeholder: "本机端口" });
     this.inputRemoteAddr = InputState.new({ placeholder: "127.0.0.1" });
     this.inputRemotePort = InputState.new({ placeholder: "远程端口" });
+    // 聚焦态：输入框边框变 accent 用。
+    const track = (state, key) => {
+      state.on("focus", (_e, cx) => { this[key] = true; cx.notify(); });
+      state.on("blur", (_e, cx) => { this[key] = false; cx.notify(); });
+    };
+    track(this.inputLocal, "typingLocal"); track(this.inputRemoteAddr, "typingAddr"); track(this.inputRemotePort, "typingPort");
     cx.spawn(async (cx) => {
       await this.cleanup();
       await this.refresh(cx);
@@ -702,65 +708,39 @@ export default class Ports extends View {
       .child(label);
   }
 
-  field(label, state) {
-    const t = theme();
-    return v_flex().gap(4)
-      .child(div().text_size(11).text_color(t.dim).child(label))
-      .child(
-        h_flex().h(30).px(9).items_center().rounded(7).border_1().border_color(t.border)
-          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-          .child(Input.new(state).h_full().text_size(12.5).text_color(t.foreground)),
-      );
-  }
-
   formView(t) {
     const f = this.form;
     if (!f) return null;
     const lockHost = f.mode === "edit-config";
-
     const hostsList = this.hosts.length
       ? this.hosts.map((h) =>
-          h_flex().px(8).py(5).rounded(6).text_size(12).text_color(t.foreground).cursor_pointer()
+          h_flex().h(26).px(9).rounded(6).text_size(12).text_color(t.foreground).cursor_pointer()
             .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-            .hover((s) => s.bg(t.selected))
-            .when(h === f.host, (e) => e.bg(t.hover))
+            .hover((s) => s.bg(t.hover))
+            .when(h === f.host, (e) => e.bg(t.selected))
             .on_click((_e, cx) => { f.host = h; f.hostOpen = false; cx.notify(); })
             .child(h))
-      : [div().px(8).py(5).text_size(12).text_color(t.dim).child("ssh config 里没有 Host")];
-
-    return v_flex().gap(10).w_full()
-      .child(div().text_size(14).font_semibold().child(
-        f.mode === "add" ? "新增转发" : f.mode === "edit-config" ? `改 ${f.item.host} 的端口` : "编辑转发"))
-      .child(
-        v_flex().gap(4)
-          .child(div().text_size(11).text_color(t.dim).child("主机（ssh 别名）"))
-          .child(
-            h_flex().h(30).px(9).items_center().rounded(7).border_1().border_color(t.border)
-              .justify_between()
-              .when(!lockHost, (e) => e.cursor_pointer().on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => { f.hostOpen = !f.hostOpen; cx.notify(); }))
-              .child(div().text_size(12.5).text_color(t.foreground).child(f.host ?? "—"))
-              .when(!lockHost, (e) => e.child(svg(icon("chevron-down")).size(12).text_color(t.dim))),
-          )
+      : [div().px(9).py(5).text_size(12).text_color(t.dim).child("ssh config 里没有 Host")];
+    const hostShell = inputShell(t, { onClick: lockHost ? null : (_e, cx) => { f.hostOpen = !f.hostOpen; cx.notify(); } },
+      div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground).child(f.host ?? "—"),
+      ...(lockHost ? [] : [svg(icon("chevron-down")).size(12).flex_none().text_color(t.dim)]));
+    // 聚焦态跟 InputState 的 focus/blur 事件走（init 里已挂到 this.typing*）。
+    const input = (state, typing) => inputShell(t, { typing }, Input.new(state).h_full().flex_1().min_w(0).text_size(12).text_color(t.foreground));
+    return v_flex().gap(12).w_full()
+      .child(field(t, "主机（ssh 别名）",
+        v_flex().gap(4).child(hostShell)
           .when(!lockHost && f.hostOpen, (e) => e.child(
-            v_flex().mt(2).p(4).rounded(7).border_1().border_color(t.border).max_h(160).overflow_y_scrollbar().children(hostsList),
-          )),
-      )
-      .child(this.field("本机端口（127.0.0.1）", this.inputLocal))
+            v_flex().p(3).rounded(7).border_1().border_color(t.border).max_h(150).overflow_y_scrollbar().children(hostsList)))))
+      .child(field(t, "本机端口（127.0.0.1）", input(this.inputLocal, this.typingLocal)))
       .when(!lockHost, (e) => e
-        .child(this.field("远程地址", this.inputRemoteAddr))
-        .child(this.field("远程端口", this.inputRemotePort)))
+        .child(field(t, "远程地址", input(this.inputRemoteAddr, this.typingAddr)))
+        .child(field(t, "远程端口", input(this.inputRemotePort, this.typingPort))))
       .when(lockHost, (e) => e.child(div().text_size(11).text_color(t.dim)
         .child(`远程目标：${f.item.remoteAddr ?? "?"}:${f.item.remotePort ?? "?"}（只改本机端口）`)))
       .when(f.err, (e) => e.child(div().px(9).py(6).rounded(7).bg(t.raised).border_1().border_color(t.ansi1).text_size(12).text_color(t.ansi1).child(f.err)))
-      .child(
-        h_flex().justify_end().gap(8)
-          .child(h_flex().h(30).px(12).items_center().rounded(8).border_1().border_color(t.input)
-            .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-            .text_color(t.foreground).cursor_pointer().on_click((_e, cx) => { this.closeForm(); cx.notify(); }).child("取消"))
-          .child(h_flex().h(30).px(14).items_center().rounded(8).bg(t.solid).text_color(t.solid_foreground)
-            .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-            .cursor_pointer().on_click((_e, cx) => this.submit(cx)).child("确定")),
-      );
+      .child(footer(
+        btnCancel("pf-cancel", "取消", (_e, cx) => { this.closeForm(); cx.notify(); }),
+        btnPrimary("pf-ok", "确定", true, (cx) => this.submit(cx))));
   }
 
   render(cx) {
